@@ -218,6 +218,11 @@ func dataCacheFlags() []cli.Flag {
 			Usage: "comma separated remote cache nodes",
 		},
 		&cli.StringFlag{
+			Name:  "remote-cache-transport",
+			Value: "http",
+			Usage: "remote cache transport (http, rdma)",
+		},
+		&cli.StringFlag{
 			Name:  "remote-cache-timeout",
 			Value: "50ms",
 			Usage: "timeout for remote cache requests",

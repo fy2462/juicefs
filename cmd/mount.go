@@ -395,6 +395,7 @@ func getChunkConf(c *cli.Context, format *meta.Format) *chunk.Config {
 		UploadHours:            c.String("upload-hours"),
 		RemoteCacheMode:        c.String("remote-cache"),
 		RemoteCacheNodes:       c.String("remote-cache-nodes"),
+		RemoteCacheTransport:   c.String("remote-cache-transport"),
 		RemoteCacheTimeout:     utils.Duration(c.String("remote-cache-timeout")),
 		RemoteCacheReplicas:    c.Int("remote-cache-replicas"),
 		RemoteCacheFillLocal:   c.Bool("remote-cache-fill-local"),

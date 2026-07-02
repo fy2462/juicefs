@@ -33,6 +33,7 @@ import (
 	"github.com/juicedata/juicefs/pkg/cache/remote"
 	"github.com/juicedata/juicefs/pkg/cache/remote/httpcache"
 	"github.com/juicedata/juicefs/pkg/cache/remote/mock"
+	"github.com/juicedata/juicefs/pkg/cache/remote/rdma"
 	"github.com/juicedata/juicefs/pkg/compress"
 	"github.com/juicedata/juicefs/pkg/object"
 	"github.com/juicedata/juicefs/pkg/utils"
@@ -562,6 +563,7 @@ type Config struct {
 	Prefetch               int
 	RemoteCacheMode        string
 	RemoteCacheNodes       string
+	RemoteCacheTransport   string
 	RemoteCacheTimeout     time.Duration
 	RemoteCacheReplicas    int
 	RemoteCacheFillLocal   bool
@@ -633,6 +635,13 @@ func (c *Config) SelfCheck(uuid string) {
 	if c.RemoteCacheMode != "none" && c.RemoteCacheMode != "mock" && c.RemoteCacheMode != "rdma" {
 		logger.Warnf("remote-cache should be one of [none, mock, rdma], setting it to none")
 		c.RemoteCacheMode = "none"
+	}
+	if c.RemoteCacheTransport == "" {
+		c.RemoteCacheTransport = "http"
+	}
+	if c.RemoteCacheTransport != "http" && c.RemoteCacheTransport != "rdma" {
+		logger.Warnf("remote-cache-transport should be one of [http, rdma], setting it to http")
+		c.RemoteCacheTransport = "http"
 	}
 	if c.RemoteCacheTimeout == 0 {
 		c.RemoteCacheTimeout = 50 * time.Millisecond
@@ -942,6 +951,9 @@ func NewCachedStore(storage object.ObjectStorage, config Config, reg prometheus.
 	if config.RemoteCacheMode == "" {
 		config.RemoteCacheMode = "none"
 	}
+	if config.RemoteCacheTransport == "" {
+		config.RemoteCacheTransport = "http"
+	}
 	if config.RemoteCacheTimeout == 0 {
 		config.RemoteCacheTimeout = 50 * time.Millisecond
 	}
@@ -965,11 +977,20 @@ func NewCachedStore(storage object.ObjectStorage, config Config, reg prometheus.
 	case "rdma":
 		nodes := remoteCacheNodes(config.RemoteCacheNodes)
 		if len(nodes) > 0 {
-			store.remoteCache = httpcache.NewClientWithOptions(httpcache.Options{
-				Nodes:    nodes,
-				Timeout:  config.RemoteCacheTimeout,
-				Replicas: config.RemoteCacheReplicas,
-			})
+			switch config.RemoteCacheTransport {
+			case "rdma":
+				store.remoteCache = rdma.NewClient(rdma.Options{
+					Nodes:    nodes,
+					Timeout:  config.RemoteCacheTimeout,
+					Replicas: config.RemoteCacheReplicas,
+				})
+			default:
+				store.remoteCache = httpcache.NewClientWithOptions(httpcache.Options{
+					Nodes:    nodes,
+					Timeout:  config.RemoteCacheTimeout,
+					Replicas: config.RemoteCacheReplicas,
+				})
+			}
 		}
 	}
 	if config.UploadLimit > 0 {

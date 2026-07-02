@@ -601,3 +601,22 @@ func TestRemoteCacheHTTPReplicasFallbackToHealthyNode(t *testing.T) {
 	require.Equal(t, []byte("copy"), p.Data)
 	require.Equal(t, int32(0), counting.gets.Load())
 }
+
+func TestRemoteCacheRDMATransportFallsBackToObjectStorage(t *testing.T) {
+	blob, _ := object.CreateStorage("mem", "", "", "", "")
+	key := "chunks/0/0/130_0_4"
+	require.NoError(t, blob.Put(context.Background(), key, bytes.NewReader([]byte("safe"))))
+	counting := &countingStore{ObjectStorage: blob}
+	conf := defaultConf
+	conf.CacheSize = 0
+	conf.RemoteCacheMode = "rdma"
+	conf.RemoteCacheTransport = "rdma"
+	conf.RemoteCacheNodes = "127.0.0.1:9568"
+	store := NewCachedStore(counting, conf, nil).(*cachedStore)
+
+	p := NewPage(make([]byte, 4))
+	defer p.Release()
+	require.NoError(t, store.load(context.Background(), key, p, false, false))
+	require.Equal(t, []byte("safe"), p.Data)
+	require.Equal(t, int32(1), counting.gets.Load())
+}
