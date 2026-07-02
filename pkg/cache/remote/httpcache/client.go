@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -33,12 +34,23 @@ import (
 
 type Client struct {
 	nodes      []string
+	replicas   int
 	httpClient *http.Client
 }
 
+type Options struct {
+	Nodes    []string
+	Timeout  time.Duration
+	Replicas int
+}
+
 func NewClient(nodes []string, timeout time.Duration) remote.Client {
-	c := &Client{httpClient: &http.Client{Timeout: timeout}}
-	for _, node := range nodes {
+	return NewClientWithOptions(Options{Nodes: nodes, Timeout: timeout, Replicas: 1})
+}
+
+func NewClientWithOptions(options Options) remote.Client {
+	c := &Client{httpClient: &http.Client{Timeout: options.Timeout}}
+	for _, node := range options.Nodes {
 		node = strings.TrimSpace(node)
 		if node == "" {
 			continue
@@ -48,93 +60,130 @@ func NewClient(nodes []string, timeout time.Duration) remote.Client {
 		}
 		c.nodes = append(c.nodes, strings.TrimRight(node, "/"))
 	}
+	c.replicas = options.Replicas
+	if c.replicas <= 0 {
+		c.replicas = 1
+	}
+	if c.replicas > len(c.nodes) {
+		c.replicas = len(c.nodes)
+	}
 	return c
 }
 
 func (c *Client) Get(ctx context.Context, key string, off, size int) (io.ReadCloser, error) {
-	base, err := c.node(key)
+	nodes, err := c.replicaNodes(key)
 	if err != nil {
 		return nil, err
 	}
-	u, err := url.Parse(base + "/cache/" + url.PathEscape(key))
-	if err != nil {
-		return nil, remote.ErrUnavailable
-	}
-	q := u.Query()
-	q.Set("off", strconv.Itoa(off))
-	q.Set("size", strconv.Itoa(size))
-	u.RawQuery = q.Encode()
+	var sawMiss bool
+	for _, base := range nodes {
+		u, err := url.Parse(base + "/cache/" + url.PathEscape(key))
+		if err != nil {
+			continue
+		}
+		q := u.Query()
+		q.Set("off", strconv.Itoa(off))
+		q.Set("size", strconv.Itoa(size))
+		u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, remote.ErrUnavailable
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+		if err != nil {
+			continue
+		}
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			continue
+		}
+		if resp.StatusCode == http.StatusNotFound {
+			resp.Body.Close()
+			sawMiss = true
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			continue
+		}
+		return resp.Body, nil
 	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, remote.ErrUnavailable
-	}
-	if resp.StatusCode == http.StatusNotFound {
-		resp.Body.Close()
+	if sawMiss {
 		return nil, remote.ErrMiss
 	}
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, remote.ErrUnavailable
-	}
-	return resp.Body, nil
+	return nil, remote.ErrUnavailable
 }
 
 func (c *Client) Put(ctx context.Context, key string, data []byte) error {
-	base, err := c.node(key)
+	nodes, err := c.replicaNodes(key)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, base+"/cache/"+url.PathEscape(key), bytes.NewReader(data))
-	if err != nil {
-		return remote.ErrUnavailable
+	var ok bool
+	for _, base := range nodes {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, base+"/cache/"+url.PathEscape(key), bytes.NewReader(data))
+		if err != nil {
+			continue
+		}
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			continue
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusNoContent {
+			ok = true
+		}
 	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return remote.ErrUnavailable
+	if ok {
+		return nil
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		return remote.ErrUnavailable
-	}
-	return nil
+	return remote.ErrUnavailable
 }
 
 func (c *Client) Delete(ctx context.Context, key string) error {
-	base, err := c.node(key)
+	nodes, err := c.replicaNodes(key)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, base+"/cache/"+url.PathEscape(key), nil)
-	if err != nil {
-		return remote.ErrUnavailable
+	var ok bool
+	for _, base := range nodes {
+		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, base+"/cache/"+url.PathEscape(key), nil)
+		if err != nil {
+			continue
+		}
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			continue
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotFound {
+			ok = true
+		}
 	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return remote.ErrUnavailable
+	if ok {
+		return nil
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
-		return remote.ErrUnavailable
-	}
-	return nil
+	return remote.ErrUnavailable
 }
 
 func (c *Client) Close() error {
 	return nil
 }
 
-func (c *Client) node(key string) (string, error) {
+func (c *Client) replicaNodes(key string) ([]string, error) {
 	if len(c.nodes) == 0 {
-		return "", remote.ErrDisabled
+		return nil, remote.ErrDisabled
 	}
+	nodes := append([]string(nil), c.nodes...)
+	sort.Slice(nodes, func(i, j int) bool {
+		return rendezvousScore(key, nodes[i]) > rendezvousScore(key, nodes[j])
+	})
+	return nodes[:c.replicas], nil
+}
+
+func rendezvousScore(key, node string) uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(key))
-	return c.nodes[int(h.Sum64()%uint64(len(c.nodes)))], nil
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(node))
+	return h.Sum64()
 }
 
 func unavailablef(format string, args ...interface{}) error {

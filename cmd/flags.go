@@ -222,6 +222,11 @@ func dataCacheFlags() []cli.Flag {
 			Value: "50ms",
 			Usage: "timeout for remote cache requests",
 		},
+		&cli.IntFlag{
+			Name:  "remote-cache-replicas",
+			Value: 1,
+			Usage: "number of remote cache nodes to use for each block",
+		},
 		&cli.BoolFlag{
 			Name:  "remote-cache-fill-local",
 			Value: true,

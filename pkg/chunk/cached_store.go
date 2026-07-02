@@ -563,6 +563,7 @@ type Config struct {
 	RemoteCacheMode        string
 	RemoteCacheNodes       string
 	RemoteCacheTimeout     time.Duration
+	RemoteCacheReplicas    int
 	RemoteCacheFillLocal   bool
 	RemoteCacheFillRemote  bool
 }
@@ -635,6 +636,9 @@ func (c *Config) SelfCheck(uuid string) {
 	}
 	if c.RemoteCacheTimeout == 0 {
 		c.RemoteCacheTimeout = 50 * time.Millisecond
+	}
+	if c.RemoteCacheReplicas <= 0 {
+		c.RemoteCacheReplicas = 1
 	}
 	if c.CacheEviction == "" {
 		c.CacheEviction = Eviction2Random
@@ -941,6 +945,9 @@ func NewCachedStore(storage object.ObjectStorage, config Config, reg prometheus.
 	if config.RemoteCacheTimeout == 0 {
 		config.RemoteCacheTimeout = 50 * time.Millisecond
 	}
+	if config.RemoteCacheReplicas <= 0 {
+		config.RemoteCacheReplicas = 1
+	}
 	store := &cachedStore{
 		storage:         storage,
 		conf:            config,
@@ -958,7 +965,11 @@ func NewCachedStore(storage object.ObjectStorage, config Config, reg prometheus.
 	case "rdma":
 		nodes := remoteCacheNodes(config.RemoteCacheNodes)
 		if len(nodes) > 0 {
-			store.remoteCache = httpcache.NewClient(nodes, config.RemoteCacheTimeout)
+			store.remoteCache = httpcache.NewClientWithOptions(httpcache.Options{
+				Nodes:    nodes,
+				Timeout:  config.RemoteCacheTimeout,
+				Replicas: config.RemoteCacheReplicas,
+			})
 		}
 	}
 	if config.UploadLimit > 0 {

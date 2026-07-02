@@ -574,3 +574,30 @@ func TestRemoteCacheHTTPTimeoutFallsBackToObjectStorage(t *testing.T) {
 	require.Equal(t, []byte("safe"), p.Data)
 	require.Equal(t, int32(1), counting.gets.Load())
 }
+
+func TestRemoteCacheHTTPReplicasFallbackToHealthyNode(t *testing.T) {
+	blob, _ := object.CreateStorage("mem", "", "", "", "")
+	counting := &countingStore{ObjectStorage: blob}
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer failing.Close()
+	backend := mock.NewClient()
+	key := "chunks/0/0/129_0_4"
+	require.NoError(t, backend.Put(context.Background(), key, []byte("copy")))
+	healthy := httptest.NewServer(httpcache.NewHandler(backend))
+	defer healthy.Close()
+
+	conf := defaultConf
+	conf.CacheSize = 0
+	conf.RemoteCacheMode = "rdma"
+	conf.RemoteCacheNodes = failing.URL + "," + healthy.URL
+	conf.RemoteCacheReplicas = 2
+	store := NewCachedStore(counting, conf, nil).(*cachedStore)
+
+	p := NewPage(make([]byte, 4))
+	defer p.Release()
+	require.NoError(t, store.load(context.Background(), key, p, false, false))
+	require.Equal(t, []byte("copy"), p.Data)
+	require.Equal(t, int32(0), counting.gets.Load())
+}

@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -77,4 +78,51 @@ func TestClientWithoutNodesIsDisabled(t *testing.T) {
 	_, err := client.Get(context.Background(), "k", 0, -1)
 	require.ErrorIs(t, err, remote.ErrDisabled)
 	require.ErrorIs(t, client.Delete(context.Background(), "k"), remote.ErrDisabled)
+}
+
+func TestClientGetFallsBackAcrossReplicas(t *testing.T) {
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer failing.Close()
+	backend := mock.NewClient()
+	require.NoError(t, backend.Put(context.Background(), "k", []byte("value")))
+	healthy := httptest.NewServer(NewHandler(backend))
+	defer healthy.Close()
+
+	client := NewClientWithOptions(Options{
+		Nodes:    []string{failing.URL, healthy.URL},
+		Timeout:  time.Second,
+		Replicas: 2,
+	})
+	r, err := client.Get(context.Background(), "k", 0, -1)
+	require.NoError(t, err)
+	data, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+	require.Equal(t, []byte("value"), data)
+}
+
+func TestClientPutReplicatesToConfiguredReplicas(t *testing.T) {
+	var puts atomic.Int32
+	servers := make([]*httptest.Server, 0, 3)
+	for i := 0; i < 3; i++ {
+		backend := mock.NewClient()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPut {
+				puts.Add(1)
+			}
+			NewHandler(backend).ServeHTTP(w, r)
+		}))
+		defer server.Close()
+		servers = append(servers, server)
+	}
+
+	client := NewClientWithOptions(Options{
+		Nodes:    []string{servers[0].URL, servers[1].URL, servers[2].URL},
+		Timeout:  time.Second,
+		Replicas: 2,
+	})
+	require.NoError(t, client.Put(context.Background(), "k", []byte("value")))
+	require.Equal(t, int32(2), puts.Load())
 }
