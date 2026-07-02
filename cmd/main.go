@@ -44,6 +44,25 @@ var debugAgentOnce sync.Once
 func Main(args []string) error {
 	// we have to call this because gspt removes all arguments
 	utils.SetProcTitle(os.Args)
+	app := NewApp()
+	if calledViaMount(args) {
+		var err error
+		args, err = handleSysMountArgs(args)
+		if err != nil {
+			return err
+		}
+		if len(args) < 1 {
+			args = []string{"mount", "--help"}
+		}
+	}
+	err := app.Run(reorderOptions(app, args))
+	if errno, ok := err.(syscall.Errno); ok && errno == 0 {
+		err = nil
+	}
+	return err
+}
+
+func NewApp() *cli.App {
 	cli.VersionFlag = &cli.BoolFlag{
 		Name: "version", Aliases: []string{"V"},
 		Usage: "print version only",
@@ -76,6 +95,7 @@ func Main(args []string) error {
 			cmdUmount(),
 			cmdGateway(),
 			cmdWebDav(),
+			cmdRDMACacheServer(),
 			cmdBench(),
 			cmdObjbench(),
 			cmdMdtest(),
@@ -93,22 +113,7 @@ func Main(args []string) error {
 	if runtime.GOOS == "windows" {
 		app.Commands = append(app.Commands, cmdPrintSID())
 	}
-
-	if calledViaMount(args) {
-		var err error
-		args, err = handleSysMountArgs(args)
-		if err != nil {
-			return err
-		}
-		if len(args) < 1 {
-			args = []string{"mount", "--help"}
-		}
-	}
-	err := app.Run(reorderOptions(app, args))
-	if errno, ok := err.(syscall.Errno); ok && errno == 0 {
-		err = nil
-	}
-	return err
+	return app
 }
 
 func calledViaMount(args []string) bool {
