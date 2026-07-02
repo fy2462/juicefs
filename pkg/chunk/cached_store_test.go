@@ -23,12 +23,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/juicedata/juicefs/pkg/cache/remote/httpcache"
+	"github.com/juicedata/juicefs/pkg/cache/remote/mock"
 	"github.com/juicedata/juicefs/pkg/object"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -501,6 +505,72 @@ func TestRemoteCacheErrorFallsBackToObjectStorage(t *testing.T) {
 	p := NewPage(make([]byte, 4))
 	defer p.Release()
 	require.NoError(t, store.load(context.Background(), "chunks/0/0/125_0_4", p, false, false))
+	require.Equal(t, []byte("safe"), p.Data)
+	require.Equal(t, int32(1), counting.gets.Load())
+}
+
+func TestRemoteCacheHTTPHitAvoidsObjectStorage(t *testing.T) {
+	blob, _ := object.CreateStorage("mem", "", "", "", "")
+	counting := &countingStore{ObjectStorage: blob}
+	backend := mock.NewClient()
+	server := httptest.NewServer(httpcache.NewHandler(backend))
+	defer server.Close()
+
+	key := "chunks/0/0/126_0_4"
+	require.NoError(t, backend.Put(context.Background(), key, []byte("rdma")))
+
+	conf := defaultConf
+	conf.CacheSize = 0
+	conf.RemoteCacheMode = "rdma"
+	conf.RemoteCacheNodes = server.URL
+	store := NewCachedStore(counting, conf, nil).(*cachedStore)
+
+	p := NewPage(make([]byte, 4))
+	defer p.Release()
+	require.NoError(t, store.load(context.Background(), key, p, false, false))
+	require.Equal(t, []byte("rdma"), p.Data)
+	require.Equal(t, int32(0), counting.gets.Load())
+}
+
+func TestRemoteCacheRDMAModeWithoutNodesFallsBackToObjectStorage(t *testing.T) {
+	blob, _ := object.CreateStorage("mem", "", "", "", "")
+	key := "chunks/0/0/127_0_4"
+	require.NoError(t, blob.Put(context.Background(), key, bytes.NewReader([]byte("cold"))))
+	counting := &countingStore{ObjectStorage: blob}
+	conf := defaultConf
+	conf.CacheSize = 0
+	conf.RemoteCacheMode = "rdma"
+	store := NewCachedStore(counting, conf, nil).(*cachedStore)
+
+	p := NewPage(make([]byte, 4))
+	defer p.Release()
+	require.NoError(t, store.load(context.Background(), key, p, false, false))
+	require.Equal(t, []byte("cold"), p.Data)
+	require.Equal(t, int32(1), counting.gets.Load())
+}
+
+func TestRemoteCacheHTTPTimeoutFallsBackToObjectStorage(t *testing.T) {
+	blob, _ := object.CreateStorage("mem", "", "", "", "")
+	key := "chunks/0/0/128_0_4"
+	require.NoError(t, blob.Put(context.Background(), key, bytes.NewReader([]byte("safe"))))
+	counting := &countingStore{ObjectStorage: blob}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("slow"))
+	}))
+	defer server.Close()
+
+	conf := defaultConf
+	conf.CacheSize = 0
+	conf.RemoteCacheMode = "rdma"
+	conf.RemoteCacheNodes = server.URL
+	conf.RemoteCacheTimeout = 10 * time.Millisecond
+	store := NewCachedStore(counting, conf, nil).(*cachedStore)
+
+	p := NewPage(make([]byte, 4))
+	defer p.Release()
+	require.NoError(t, store.load(context.Background(), key, p, false, false))
 	require.Equal(t, []byte("safe"), p.Data)
 	require.Equal(t, int32(1), counting.gets.Load())
 }

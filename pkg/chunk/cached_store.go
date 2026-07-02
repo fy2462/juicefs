@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/juicedata/juicefs/pkg/cache/remote"
+	"github.com/juicedata/juicefs/pkg/cache/remote/httpcache"
 	"github.com/juicedata/juicefs/pkg/cache/remote/mock"
 	"github.com/juicedata/juicefs/pkg/compress"
 	"github.com/juicedata/juicefs/pkg/object"
@@ -951,8 +952,14 @@ func NewCachedStore(storage object.ObjectStorage, config Config, reg prometheus.
 		pendingKeys:     make(map[string]*pendingItem),
 		group:           NewController(),
 	}
-	if config.RemoteCacheMode == "mock" {
+	switch config.RemoteCacheMode {
+	case "mock":
 		store.remoteCache = mock.NewClient()
+	case "rdma":
+		nodes := remoteCacheNodes(config.RemoteCacheNodes)
+		if len(nodes) > 0 {
+			store.remoteCache = httpcache.NewClient(nodes, config.RemoteCacheTimeout)
+		}
 	}
 	if config.UploadLimit > 0 {
 		// there are overheads coming from HTTP/TCP/IP
@@ -1032,6 +1039,17 @@ func NewCachedStore(storage object.ObjectStorage, config Config, reg prometheus.
 	}
 	store.regMetrics(reg)
 	return store
+}
+
+func remoteCacheNodes(raw string) []string {
+	var nodes []string
+	for _, node := range strings.Split(raw, ",") {
+		node = strings.TrimSpace(node)
+		if node != "" {
+			nodes = append(nodes, node)
+		}
+	}
+	return nodes
 }
 
 func (store *cachedStore) initMetrics() {
