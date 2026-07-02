@@ -1,4 +1,4 @@
-//go:build !rdma
+//go:build rdma
 
 /*
  * JuiceFS, Copyright 2026 Juicedata, Inc.
@@ -18,9 +18,7 @@
 
 package rdma
 
-import (
-	"github.com/juicedata/juicefs/pkg/cache/remote"
-)
+import "github.com/juicedata/juicefs/pkg/cache/remote"
 
 func NewClient(options Options) remote.Client {
 	return unsupportedClient{}
