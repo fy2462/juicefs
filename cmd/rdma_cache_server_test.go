@@ -17,8 +17,11 @@
 package cmd
 
 import (
+	"context"
+	"io"
 	"testing"
 
+	"github.com/juicedata/juicefs/pkg/cache/remote/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,4 +34,25 @@ func TestRDMACacheServerCommandRegistered(t *testing.T) {
 		}
 	}
 	t.Fatal("rdma-cache-server command is not registered")
+}
+
+func TestRDMACacheServerBackendDefaultsToMemory(t *testing.T) {
+	backend, err := newRDMACacheBackend("", "8")
+	require.NoError(t, err)
+	_, ok := backend.(*mock.Client)
+	require.True(t, ok)
+}
+
+func TestRDMACacheServerBackendUsesDiskCache(t *testing.T) {
+	backend, err := newRDMACacheBackend(t.TempDir(), "8")
+	require.NoError(t, err)
+	defer backend.Close()
+
+	require.NoError(t, backend.Put(context.Background(), "k", []byte("data")))
+	r, err := backend.Get(context.Background(), "k", 0, -1)
+	require.NoError(t, err)
+	data, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+	require.Equal(t, []byte("data"), data)
 }

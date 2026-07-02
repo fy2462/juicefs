@@ -25,8 +25,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juicedata/juicefs/pkg/cache/remote"
+	"github.com/juicedata/juicefs/pkg/cache/remote/diskcache"
 	"github.com/juicedata/juicefs/pkg/cache/remote/httpcache"
 	"github.com/juicedata/juicefs/pkg/cache/remote/mock"
+	"github.com/juicedata/juicefs/pkg/utils"
 	"github.com/urfave/cli/v2"
 )
 
@@ -56,14 +59,16 @@ func cmdRDMACacheServer() *cli.Command {
 
 func rdmaCacheServer(c *cli.Context) error {
 	listen := c.String("listen")
-	if cacheDir := c.String("cache-dir"); cacheDir != "" {
-		logger.Infof("rdma-cache-server cache-dir %s is reserved for a future disk backend", cacheDir)
+	backend, err := newRDMACacheBackend(c.String("cache-dir"), c.String("cache-size"))
+	if err != nil {
+		return err
 	}
-	logger.Infof("starting rdma-cache-server on %s with reserved cache-size %s", listen, c.String("cache-size"))
+	defer backend.Close()
+	logger.Infof("starting rdma-cache-server on %s with cache-size %s", listen, c.String("cache-size"))
 
 	srv := &http.Server{
 		Addr:              listen,
-		Handler:           httpcache.NewHandler(mock.NewClient()),
+		Handler:           httpcache.NewHandler(backend),
 		ReadHeaderTimeout: time.Second * 5,
 	}
 	errCh := make(chan error, 1)
@@ -87,4 +92,15 @@ func rdmaCacheServer(c *cli.Context) error {
 		}
 		return err
 	}
+}
+
+func newRDMACacheBackend(cacheDir string, cacheSize string) (remote.Client, error) {
+	if cacheDir == "" {
+		return mock.NewClient(), nil
+	}
+	size := utils.ParseBytesStr("cache-size", cacheSize, 'B')
+	return diskcache.NewClient(diskcache.Options{
+		Dir:      cacheDir,
+		Capacity: int64(size),
+	})
 }
