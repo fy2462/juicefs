@@ -23,3 +23,11 @@ import "github.com/juicedata/juicefs/pkg/cache/remote"
 func NewClient(options Options) remote.Client {
 	return unsupportedClient{}
 }
+
+func Capability() CapabilityInfo {
+	return CapabilityInfo{
+		Built:     true,
+		Available: false,
+		Reason:    "native RDMA implementation is not available yet",
+	}
+}

@@ -40,6 +40,13 @@ func TestNewClientReturnsUnsupportedByDefault(t *testing.T) {
 	require.NoError(t, client.Close())
 }
 
+func TestCapabilityDefaultBuild(t *testing.T) {
+	capability := Capability()
+
+	require.False(t, capability.Available)
+	require.NotEmpty(t, capability.Reason)
+}
+
 func TestServerHandleFrameUsesProtocolExecutor(t *testing.T) {
 	backend := mock.NewClient()
 	server := NewServer(backend)

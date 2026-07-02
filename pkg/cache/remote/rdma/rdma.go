@@ -25,3 +25,11 @@ import (
 func NewClient(options Options) remote.Client {
 	return unsupportedClient{}
 }
+
+func Capability() CapabilityInfo {
+	return CapabilityInfo{
+		Built:     false,
+		Available: false,
+		Reason:    ErrUnsupported.Error(),
+	}
+}

@@ -25,6 +25,12 @@ import (
 
 var ErrUnsupported = errors.New("RDMA remote cache transport is not built")
 
+type CapabilityInfo struct {
+	Built     bool
+	Available bool
+	Reason    string
+}
+
 type Options struct {
 	Nodes    []string
 	Timeout  time.Duration
