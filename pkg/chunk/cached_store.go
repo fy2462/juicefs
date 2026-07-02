@@ -557,6 +557,11 @@ type Config struct {
 	BufferSize             uint64
 	Readahead              int
 	Prefetch               int
+	RemoteCacheMode        string
+	RemoteCacheNodes       string
+	RemoteCacheTimeout     time.Duration
+	RemoteCacheFillLocal   bool
+	RemoteCacheFillRemote  bool
 }
 
 func (c *Config) SelfCheck(uuid string) {
@@ -617,6 +622,16 @@ func (c *Config) SelfCheck(uuid string) {
 	if _, _, err := c.parseHours(); err != nil {
 		logger.Warnf("invalid value (%s) for upload-hours: %s", c.UploadHours, err)
 		c.UploadHours = ""
+	}
+	if c.RemoteCacheMode == "" {
+		c.RemoteCacheMode = "none"
+	}
+	if c.RemoteCacheMode != "none" && c.RemoteCacheMode != "mock" && c.RemoteCacheMode != "rdma" {
+		logger.Warnf("remote-cache should be one of [none, mock, rdma], setting it to none")
+		c.RemoteCacheMode = "none"
+	}
+	if c.RemoteCacheTimeout == 0 {
+		c.RemoteCacheTimeout = 50 * time.Millisecond
 	}
 	if c.CacheEviction == "" {
 		c.CacheEviction = Eviction2Random
@@ -681,16 +696,23 @@ type cachedStore struct {
 	upLimit         *ratelimit.Bucket
 	downLimit       *ratelimit.Bucket
 
-	cacheHits           prometheus.Counter
-	cacheMiss           prometheus.Counter
-	cacheHitBytes       prometheus.Counter
-	cacheMissBytes      prometheus.Counter
-	cacheReadHist       prometheus.Histogram
-	objectReqsHistogram *prometheus.HistogramVec
-	objectReqErrors     prometheus.Counter
-	objectDataBytes     *prometheus.CounterVec
-	stageBlockDelay     prometheus.Counter
-	stageBlockErrors    prometheus.Counter
+	cacheHits            prometheus.Counter
+	cacheMiss            prometheus.Counter
+	cacheHitBytes        prometheus.Counter
+	cacheMissBytes       prometheus.Counter
+	cacheReadHist        prometheus.Histogram
+	objectReqsHistogram  *prometheus.HistogramVec
+	objectReqErrors      prometheus.Counter
+	objectDataBytes      *prometheus.CounterVec
+	stageBlockDelay      prometheus.Counter
+	stageBlockErrors     prometheus.Counter
+	remoteCacheGets      *prometheus.CounterVec
+	remoteCacheGetBytes  *prometheus.CounterVec
+	remoteCachePuts      *prometheus.CounterVec
+	remoteCachePutBytes  *prometheus.CounterVec
+	remoteCacheGetHist   prometheus.Histogram
+	remoteCachePutHist   prometheus.Histogram
+	remoteCacheFallbacks prometheus.Counter
 }
 
 func logRequest(typeStr, key, param, reqID string, err error, used time.Duration) {
@@ -971,6 +993,36 @@ func (store *cachedStore) initMetrics() {
 		Name: "staging_block_errors",
 		Help: "Total errors when staging blocks",
 	})
+	store.remoteCacheGets = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "remote_cache_gets_total",
+		Help: "remote cache get requests",
+	}, []string{"result"})
+	store.remoteCacheGetBytes = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "remote_cache_get_bytes_total",
+		Help: "remote cache get bytes",
+	}, []string{"result"})
+	store.remoteCachePuts = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "remote_cache_puts_total",
+		Help: "remote cache put requests",
+	}, []string{"result"})
+	store.remoteCachePutBytes = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "remote_cache_put_bytes_total",
+		Help: "remote cache put bytes",
+	}, []string{"result"})
+	store.remoteCacheGetHist = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "remote_cache_get_seconds",
+		Help:    "remote cache get latency distribution",
+		Buckets: prometheus.ExponentialBuckets(0.00001, 2, 20),
+	})
+	store.remoteCachePutHist = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "remote_cache_put_seconds",
+		Help:    "remote cache put latency distribution",
+		Buckets: prometheus.ExponentialBuckets(0.00001, 2, 20),
+	})
+	store.remoteCacheFallbacks = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "remote_cache_fallbacks_total",
+		Help: "remote cache fallbacks to object storage",
+	})
 }
 
 func (store *cachedStore) regMetrics(reg prometheus.Registerer) {
@@ -987,6 +1039,13 @@ func (store *cachedStore) regMetrics(reg prometheus.Registerer) {
 	reg.MustRegister(store.objectDataBytes)
 	reg.MustRegister(store.stageBlockDelay)
 	reg.MustRegister(store.stageBlockErrors)
+	reg.MustRegister(store.remoteCacheGets)
+	reg.MustRegister(store.remoteCacheGetBytes)
+	reg.MustRegister(store.remoteCachePuts)
+	reg.MustRegister(store.remoteCachePutBytes)
+	reg.MustRegister(store.remoteCacheGetHist)
+	reg.MustRegister(store.remoteCachePutHist)
+	reg.MustRegister(store.remoteCacheFallbacks)
 	reg.MustRegister(prometheus.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Name: "blockcache_blocks",

@@ -408,3 +408,12 @@ func TestStoreRetry(t *testing.T) {
 	cs.(*cachedStore).load(context.TODO(), "non", p, false, false) // wont retry
 	require.Equal(t, int32(1), s.cnt)
 }
+
+func TestRemoteCacheConfigValidation(t *testing.T) {
+	conf := defaultConf
+	conf.RemoteCacheMode = "bad"
+	conf.SelfCheck("test-uuid")
+
+	require.Equal(t, "none", conf.RemoteCacheMode)
+	require.Equal(t, 50*time.Millisecond, conf.RemoteCacheTimeout)
+}
