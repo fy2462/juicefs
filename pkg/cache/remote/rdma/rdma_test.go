@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juicedata/juicefs/pkg/cache/remote/mock"
+	"github.com/juicedata/juicefs/pkg/cache/remote/rdma/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,4 +38,37 @@ func TestNewClientReturnsUnsupportedByDefault(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnsupported)
 	require.ErrorIs(t, client.Delete(context.Background(), "k"), ErrUnsupported)
 	require.NoError(t, client.Close())
+}
+
+func TestServerHandleFrameUsesProtocolExecutor(t *testing.T) {
+	backend := mock.NewClient()
+	server := NewServer(backend)
+	req, err := protocol.EncodeRequest(protocol.Request{
+		Op:      protocol.OpPut,
+		Key:     "k",
+		Payload: []byte("data"),
+	})
+	require.NoError(t, err)
+	frame, err := server.HandleFrame(context.Background(), req)
+	require.NoError(t, err)
+	resp, err := protocol.DecodeResponse(frame)
+	require.NoError(t, err)
+	require.Equal(t, protocol.StatusOK, resp.Status)
+
+	req, err = protocol.EncodeRequest(protocol.Request{Op: protocol.OpGet, Key: "k", Size: -1})
+	require.NoError(t, err)
+	frame, err = server.HandleFrame(context.Background(), req)
+	require.NoError(t, err)
+	resp, err = protocol.DecodeResponse(frame)
+	require.NoError(t, err)
+	require.Equal(t, protocol.StatusOK, resp.Status)
+	require.Equal(t, []byte("data"), resp.Payload)
+}
+
+func TestServerHandleFrameBadRequest(t *testing.T) {
+	frame, err := NewServer(mock.NewClient()).HandleFrame(context.Background(), []byte("{"))
+	require.NoError(t, err)
+	resp, err := protocol.DecodeResponse(frame)
+	require.NoError(t, err)
+	require.Equal(t, protocol.StatusBadRequest, resp.Status)
 }

@@ -17,9 +17,13 @@
 package protocol
 
 import (
+	"context"
+	"errors"
+	"io"
 	"testing"
 
 	"github.com/juicedata/juicefs/pkg/cache/remote"
+	"github.com/juicedata/juicefs/pkg/cache/remote/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -46,4 +50,80 @@ func TestStatusToError(t *testing.T) {
 	require.ErrorIs(t, StatusToError(StatusMiss), remote.ErrMiss)
 	require.ErrorIs(t, StatusToError(StatusUnavailable), remote.ErrUnavailable)
 	require.ErrorIs(t, StatusToError(StatusBadRequest), remote.ErrUnavailable)
+}
+
+func TestExecutorGetHitRange(t *testing.T) {
+	backend := mock.NewClient()
+	require.NoError(t, backend.Put(context.Background(), "k", []byte("abcdef")))
+
+	resp := Executor{Backend: backend}.Handle(context.Background(), Request{
+		Op:   OpGet,
+		Key:  "k",
+		Off:  2,
+		Size: 3,
+	})
+
+	require.Equal(t, StatusOK, resp.Status)
+	require.Equal(t, []byte("cde"), resp.Payload)
+}
+
+func TestExecutorGetMiss(t *testing.T) {
+	resp := Executor{Backend: mock.NewClient()}.Handle(context.Background(), Request{
+		Op:   OpGet,
+		Key:  "missing",
+		Size: -1,
+	})
+
+	require.Equal(t, StatusMiss, resp.Status)
+}
+
+func TestExecutorPutThenGet(t *testing.T) {
+	backend := mock.NewClient()
+	executor := Executor{Backend: backend}
+
+	resp := executor.Handle(context.Background(), Request{Op: OpPut, Key: "k", Payload: []byte("data")})
+	require.Equal(t, StatusOK, resp.Status)
+	resp = executor.Handle(context.Background(), Request{Op: OpGet, Key: "k", Size: -1})
+	require.Equal(t, StatusOK, resp.Status)
+	require.Equal(t, []byte("data"), resp.Payload)
+}
+
+func TestExecutorDelete(t *testing.T) {
+	backend := mock.NewClient()
+	require.NoError(t, backend.Put(context.Background(), "k", []byte("data")))
+	executor := Executor{Backend: backend}
+
+	resp := executor.Handle(context.Background(), Request{Op: OpDelete, Key: "k"})
+	require.Equal(t, StatusOK, resp.Status)
+	_, err := backend.Get(context.Background(), "k", 0, -1)
+	require.True(t, errors.Is(err, remote.ErrMiss))
+}
+
+func TestExecutorBadRequest(t *testing.T) {
+	resp := Executor{Backend: mock.NewClient()}.Handle(context.Background(), Request{Op: Op("BAD"), Key: "k"})
+
+	require.Equal(t, StatusBadRequest, resp.Status)
+}
+
+func TestExecutorBackendUnavailable(t *testing.T) {
+	backend := mock.NewClient()
+	require.NoError(t, backend.Close())
+
+	resp := Executor{Backend: backend}.Handle(context.Background(), Request{Op: OpGet, Key: "k", Size: -1})
+
+	require.Equal(t, StatusUnavailable, resp.Status)
+}
+
+type badReaderBackend struct {
+	remote.Client
+}
+
+func (b badReaderBackend) Get(ctx context.Context, key string, off, size int) (io.ReadCloser, error) {
+	return io.NopCloser(errReader{}), nil
+}
+
+type errReader struct{}
+
+func (errReader) Read(p []byte) (int, error) {
+	return 0, errors.New("read failed")
 }

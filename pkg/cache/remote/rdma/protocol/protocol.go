@@ -17,7 +17,10 @@
 package protocol
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
 
 	"github.com/juicedata/juicefs/pkg/cache/remote"
 )
@@ -52,6 +55,10 @@ type Response struct {
 	Payload []byte `json:"payload,omitempty"`
 }
 
+type Executor struct {
+	Backend remote.Client
+}
+
 func EncodeRequest(req Request) ([]byte, error) {
 	return json.Marshal(req)
 }
@@ -81,4 +88,46 @@ func StatusToError(status Status) error {
 	default:
 		return remote.ErrUnavailable
 	}
+}
+
+func (e Executor) Handle(ctx context.Context, req Request) Response {
+	if e.Backend == nil {
+		return Response{Status: StatusUnavailable}
+	}
+	switch req.Op {
+	case OpGet:
+		return e.get(ctx, req)
+	case OpPut:
+		if err := e.Backend.Put(ctx, req.Key, req.Payload); err != nil {
+			return Response{Status: statusFromError(err)}
+		}
+		return Response{Status: StatusOK}
+	case OpDelete:
+		if err := e.Backend.Delete(ctx, req.Key); err != nil {
+			return Response{Status: statusFromError(err)}
+		}
+		return Response{Status: StatusOK}
+	default:
+		return Response{Status: StatusBadRequest}
+	}
+}
+
+func (e Executor) get(ctx context.Context, req Request) Response {
+	reader, err := e.Backend.Get(ctx, req.Key, req.Off, req.Size)
+	if err != nil {
+		return Response{Status: statusFromError(err)}
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return Response{Status: StatusUnavailable}
+	}
+	return Response{Status: StatusOK, Payload: data}
+}
+
+func statusFromError(err error) Status {
+	if errors.Is(err, remote.ErrMiss) {
+		return StatusMiss
+	}
+	return StatusUnavailable
 }
