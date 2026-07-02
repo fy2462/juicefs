@@ -393,6 +393,11 @@ func getChunkConf(c *cli.Context, format *meta.Format) *chunk.Config {
 		DownloadLimit:          utils.ParseMbps(c, "download-limit") * 1e6 / 8,
 		UploadDelay:            utils.Duration(c.String("upload-delay")),
 		UploadHours:            c.String("upload-hours"),
+		RemoteCacheMode:        c.String("remote-cache"),
+		RemoteCacheNodes:       c.String("remote-cache-nodes"),
+		RemoteCacheTimeout:     utils.Duration(c.String("remote-cache-timeout")),
+		RemoteCacheFillLocal:   c.Bool("remote-cache-fill-local"),
+		RemoteCacheFillRemote:  c.Bool("remote-cache-fill-remote"),
 
 		CacheDir:          c.String("cache-dir"),
 		CacheSize:         utils.ParseBytes(c, "cache-size", 'M'),

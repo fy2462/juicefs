@@ -99,6 +99,11 @@ func TestHandleSysMountArgs(t *testing.T) {
 			false,
 		},
 		{
+			[]string{"/mount.juicefs", "memkv://", "/jfs", "-o", "remote-cache=mock,remote-cache-nodes=127.0.0.1:9000,remote-cache-timeout=25ms,remote-cache-fill-local=true,remote-cache-fill-remote=false"},
+			"juicefs mount -d --remote-cache=mock --remote-cache-nodes=127.0.0.1:9000 --remote-cache-timeout=25ms --remote-cache-fill-local=true --remote-cache-fill-remote=false memkv:// /jfs",
+			false,
+		},
+		{
 			[]string{"/mount.juicefs", "memkv://", "/jfs", "-o", "cache-size"},
 			"",
 			true,

@@ -208,6 +208,30 @@ func dataCacheFlags() []cli.Flag {
 			Value: 1,
 			Usage: "prefetch N blocks in parallel",
 		},
+		&cli.StringFlag{
+			Name:  "remote-cache",
+			Value: "none",
+			Usage: "remote cache mode (none, mock, rdma)",
+		},
+		&cli.StringFlag{
+			Name:  "remote-cache-nodes",
+			Usage: "comma separated remote cache nodes",
+		},
+		&cli.StringFlag{
+			Name:  "remote-cache-timeout",
+			Value: "50ms",
+			Usage: "timeout for remote cache requests",
+		},
+		&cli.BoolFlag{
+			Name:  "remote-cache-fill-local",
+			Value: true,
+			Usage: "fill local cache after remote cache hit",
+		},
+		&cli.BoolFlag{
+			Name:  "remote-cache-fill-remote",
+			Value: true,
+			Usage: "fill remote cache after object storage read",
+		},
 		&cli.BoolFlag{
 			Name:  "writeback",
 			Usage: "upload blocks in background",
