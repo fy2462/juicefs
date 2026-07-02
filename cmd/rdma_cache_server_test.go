@@ -18,10 +18,12 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 
 	"github.com/juicedata/juicefs/pkg/cache/remote/mock"
+	"github.com/juicedata/juicefs/pkg/cache/remote/rdma"
 	"github.com/stretchr/testify/require"
 )
 
@@ -55,4 +57,16 @@ func TestRDMACacheServerBackendUsesDiskCache(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, r.Close())
 	require.Equal(t, []byte("data"), data)
+}
+
+func TestRDMACacheServerTransportHTTPCreatesHandler(t *testing.T) {
+	handler, err := newRDMACacheServerHandler("http", mock.NewClient())
+	require.NoError(t, err)
+	require.NotNil(t, handler)
+}
+
+func TestRDMACacheServerTransportRDMAReturnsUnsupported(t *testing.T) {
+	handler, err := newRDMACacheServerHandler("rdma", mock.NewClient())
+	require.Nil(t, handler)
+	require.True(t, errors.Is(err, rdma.ErrUnsupported))
 }
