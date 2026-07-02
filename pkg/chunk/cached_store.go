@@ -30,6 +30,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/juicedata/juicefs/pkg/cache/remote"
+	"github.com/juicedata/juicefs/pkg/cache/remote/mock"
 	"github.com/juicedata/juicefs/pkg/compress"
 	"github.com/juicedata/juicefs/pkg/object"
 	"github.com/juicedata/juicefs/pkg/utils"
@@ -695,6 +697,7 @@ type cachedStore struct {
 	seekable        bool
 	upLimit         *ratelimit.Bucket
 	downLimit       *ratelimit.Bucket
+	remoteCache     remote.Client
 
 	cacheHits            prometheus.Counter
 	cacheMiss            prometheus.Counter
@@ -724,6 +727,71 @@ func logRequest(typeStr, key, param, reqID string, err error, used time.Duration
 }
 
 var errTryFullRead = errors.New("try full read")
+
+func (store *cachedStore) remoteCacheEnabled() bool {
+	return store.remoteCache != nil && store.conf.RemoteCacheMode != "none"
+}
+
+func (store *cachedStore) loadRemote(ctx context.Context, key string, page *Page) bool {
+	if !store.remoteCacheEnabled() {
+		return false
+	}
+	start := time.Now()
+	rcCtx, cancel := context.WithTimeout(ctx, store.conf.RemoteCacheTimeout)
+	defer cancel()
+
+	in, err := store.remoteCache.Get(rcCtx, key, 0, len(page.Data))
+	used := time.Since(start)
+	store.remoteCacheGetHist.Observe(used.Seconds())
+	if err != nil {
+		if errors.Is(err, remote.ErrMiss) {
+			store.remoteCacheGets.WithLabelValues("miss").Add(1)
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			store.remoteCacheGets.WithLabelValues("timeout").Add(1)
+		} else {
+			store.remoteCacheGets.WithLabelValues("error").Add(1)
+		}
+		store.remoteCacheFallbacks.Add(1)
+		return false
+	}
+	defer in.Close()
+
+	n, err := io.ReadFull(in, page.Data)
+	if err != nil || n != len(page.Data) {
+		store.remoteCacheGets.WithLabelValues("error").Add(1)
+		store.remoteCacheFallbacks.Add(1)
+		return false
+	}
+	store.remoteCacheGets.WithLabelValues("hit").Add(1)
+	store.remoteCacheGetBytes.WithLabelValues("hit").Add(float64(n))
+	return true
+}
+
+func (store *cachedStore) fillRemote(key string, page *Page) {
+	if !store.remoteCacheEnabled() || !store.conf.RemoteCacheFillRemote {
+		return
+	}
+	data := make([]byte, len(page.Data))
+	copy(data, page.Data)
+	go func() {
+		start := time.Now()
+		rcCtx, cancel := context.WithTimeout(context.Background(), store.conf.RemoteCacheTimeout)
+		defer cancel()
+		err := store.remoteCache.Put(rcCtx, key, data)
+		used := time.Since(start)
+		store.remoteCachePutHist.Observe(used.Seconds())
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				store.remoteCachePuts.WithLabelValues("timeout").Add(1)
+			} else {
+				store.remoteCachePuts.WithLabelValues("error").Add(1)
+			}
+			return
+		}
+		store.remoteCachePuts.WithLabelValues("ok").Add(1)
+		store.remoteCachePutBytes.WithLabelValues("ok").Add(float64(len(data)))
+	}()
+}
 
 func (store *cachedStore) loadRange(ctx context.Context, key string, page *Page, off int) (n int, err error) {
 	p := page.Data
@@ -781,6 +849,12 @@ func (store *cachedStore) load(ctx context.Context, key string, page *Page, cach
 			err = fmt.Errorf("recovered from %s", e)
 		}
 	}()
+	if !forceCache && store.loadRemote(ctx, key, page) {
+		if cache && store.conf.RemoteCacheFillLocal {
+			store.bcache.cache(key, page, forceCache, !store.conf.OSCache)
+		}
+		return nil
+	}
 	store.currentDownload <- struct{}{}
 	defer func() { <-store.currentDownload }()
 	needed := store.compressor.CompressBound(len(page.Data))
@@ -838,6 +912,7 @@ func (store *cachedStore) load(ctx context.Context, key string, page *Page, cach
 	if err != nil || n < len(page.Data) {
 		return fmt.Errorf("read %s fully: %v (%d < %d) after %s", key, err, n, len(page.Data), used)
 	}
+	store.fillRemote(key, page)
 	if cache {
 		store.bcache.cache(key, page, forceCache, !store.conf.OSCache)
 	}
@@ -859,6 +934,12 @@ func NewCachedStore(storage object.ObjectStorage, config Config, reg prometheus.
 	if config.PutTimeout == 0 {
 		config.PutTimeout = time.Second * 60
 	}
+	if config.RemoteCacheMode == "" {
+		config.RemoteCacheMode = "none"
+	}
+	if config.RemoteCacheTimeout == 0 {
+		config.RemoteCacheTimeout = 50 * time.Millisecond
+	}
 	store := &cachedStore{
 		storage:         storage,
 		conf:            config,
@@ -869,6 +950,9 @@ func NewCachedStore(storage object.ObjectStorage, config Config, reg prometheus.
 		pendingCh:       make(chan *pendingItem, 100*config.MaxUpload),
 		pendingKeys:     make(map[string]*pendingItem),
 		group:           NewController(),
+	}
+	if config.RemoteCacheMode == "mock" {
+		store.remoteCache = mock.NewClient()
 	}
 	if config.UploadLimit > 0 {
 		// there are overheads coming from HTTP/TCP/IP
