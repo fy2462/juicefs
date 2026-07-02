@@ -23,7 +23,7 @@ import (
 )
 
 func NewClient(options Options) remote.Client {
-	return unsupportedClient{}
+	return newClient(options)
 }
 
 func Capability() CapabilityInfo {

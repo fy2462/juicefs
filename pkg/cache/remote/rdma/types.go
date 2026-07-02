@@ -17,10 +17,14 @@
 package rdma
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"time"
+
+	"github.com/juicedata/juicefs/pkg/cache/remote/rdma/protocol"
 )
 
 var ErrUnsupported = errors.New("RDMA remote cache transport is not built")
@@ -35,31 +39,106 @@ type Options struct {
 	Nodes    []string
 	Timeout  time.Duration
 	Replicas int
+	Dialer   Dialer
 }
 
-type unsupportedClient struct{}
+type Conn interface {
+	RoundTrip(ctx context.Context, req protocol.Request) (protocol.Response, error)
+	Close() error
+}
 
-func (unsupportedClient) Get(ctx context.Context, key string, off, size int) (io.ReadCloser, error) {
+type Dialer interface {
+	Dial(ctx context.Context, node string, options Options) (Conn, error)
+}
+
+type Client struct {
+	options Options
+	mu      sync.Mutex
+	conn    Conn
+	closed  bool
+}
+
+type unsupportedDialer struct{}
+
+func newClient(options Options) *Client {
+	if options.Dialer == nil {
+		options.Dialer = unsupportedDialer{}
+	}
+	return &Client{options: options}
+}
+
+func (unsupportedDialer) Dial(ctx context.Context, node string, options Options) (Conn, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	return nil, ErrUnsupported
 }
 
-func (unsupportedClient) Put(ctx context.Context, key string, data []byte) error {
-	if err := ctx.Err(); err != nil {
-		return err
+func (c *Client) Get(ctx context.Context, key string, off, size int) (io.ReadCloser, error) {
+	resp, err := c.roundTrip(ctx, protocol.Request{Op: protocol.OpGet, Key: key, Off: off, Size: size})
+	if err != nil {
+		return nil, err
 	}
-	return ErrUnsupported
+	if err := protocol.StatusToError(resp.Status); err != nil {
+		return nil, err
+	}
+	data := make([]byte, len(resp.Payload))
+	copy(data, resp.Payload)
+	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
-func (unsupportedClient) Delete(ctx context.Context, key string) error {
-	if err := ctx.Err(); err != nil {
+func (c *Client) Put(ctx context.Context, key string, data []byte) error {
+	payload := make([]byte, len(data))
+	copy(payload, data)
+	resp, err := c.roundTrip(ctx, protocol.Request{Op: protocol.OpPut, Key: key, Payload: payload})
+	if err != nil {
 		return err
 	}
-	return ErrUnsupported
+	return protocol.StatusToError(resp.Status)
 }
 
-func (unsupportedClient) Close() error {
+func (c *Client) Delete(ctx context.Context, key string) error {
+	resp, err := c.roundTrip(ctx, protocol.Request{Op: protocol.OpDelete, Key: key})
+	if err != nil {
+		return err
+	}
+	return protocol.StatusToError(resp.Status)
+}
+
+func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	if c.conn != nil {
+		return c.conn.Close()
+	}
 	return nil
+}
+
+func (c *Client) roundTrip(ctx context.Context, req protocol.Request) (protocol.Response, error) {
+	conn, err := c.connection(ctx)
+	if err != nil {
+		return protocol.Response{}, err
+	}
+	return conn.RoundTrip(ctx, req)
+}
+
+func (c *Client) connection(ctx context.Context) (Conn, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil, ErrUnsupported
+	}
+	if c.conn != nil {
+		return c.conn, nil
+	}
+	if len(c.options.Nodes) == 0 {
+		return nil, ErrUnsupported
+	}
+	conn, err := c.options.Dialer.Dial(ctx, c.options.Nodes[0], c.options)
+	if err != nil {
+		return nil, err
+	}
+	c.conn = conn
+	return conn, nil
 }

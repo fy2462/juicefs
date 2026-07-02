@@ -18,9 +18,11 @@ package rdma
 
 import (
 	"context"
+	"io"
 	"testing"
 	"time"
 
+	"github.com/juicedata/juicefs/pkg/cache/remote"
 	"github.com/juicedata/juicefs/pkg/cache/remote/mock"
 	"github.com/juicedata/juicefs/pkg/cache/remote/rdma/protocol"
 	"github.com/stretchr/testify/require"
@@ -78,4 +80,77 @@ func TestServerHandleFrameBadRequest(t *testing.T) {
 	resp, err := protocol.DecodeResponse(frame)
 	require.NoError(t, err)
 	require.Equal(t, protocol.StatusBadRequest, resp.Status)
+}
+
+func TestClientRoundTripGet(t *testing.T) {
+	backend := mock.NewClient()
+	require.NoError(t, backend.Put(context.Background(), "k", []byte("abcdef")))
+	client := NewClient(Options{
+		Nodes:  []string{"node-a"},
+		Dialer: memoryDialer{server: NewServer(backend)},
+	})
+
+	r, err := client.Get(context.Background(), "k", 2, 3)
+	require.NoError(t, err)
+	data, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+	require.Equal(t, []byte("cde"), data)
+	require.NoError(t, client.Close())
+}
+
+func TestClientRoundTripPutDelete(t *testing.T) {
+	backend := mock.NewClient()
+	client := NewClient(Options{
+		Nodes:  []string{"node-a"},
+		Dialer: memoryDialer{server: NewServer(backend)},
+	})
+
+	require.NoError(t, client.Put(context.Background(), "k", []byte("data")))
+	r, err := backend.Get(context.Background(), "k", 0, -1)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+	require.NoError(t, client.Delete(context.Background(), "k"))
+	_, err = backend.Get(context.Background(), "k", 0, -1)
+	require.ErrorIs(t, err, remote.ErrMiss)
+	require.NoError(t, client.Close())
+}
+
+func TestClientRoundTripMiss(t *testing.T) {
+	client := NewClient(Options{
+		Nodes:  []string{"node-a"},
+		Dialer: memoryDialer{server: NewServer(mock.NewClient())},
+	})
+
+	_, err := client.Get(context.Background(), "missing", 0, -1)
+	require.ErrorIs(t, err, remote.ErrMiss)
+	require.NoError(t, client.Close())
+}
+
+type memoryDialer struct {
+	server *Server
+}
+
+func (d memoryDialer) Dial(ctx context.Context, node string, options Options) (Conn, error) {
+	return memoryConn{server: d.server}, nil
+}
+
+type memoryConn struct {
+	server *Server
+}
+
+func (c memoryConn) RoundTrip(ctx context.Context, req protocol.Request) (protocol.Response, error) {
+	frame, err := protocol.EncodeRequest(req)
+	if err != nil {
+		return protocol.Response{}, err
+	}
+	frame, err = c.server.HandleFrame(ctx, frame)
+	if err != nil {
+		return protocol.Response{}, err
+	}
+	return protocol.DecodeResponse(frame)
+}
+
+func (c memoryConn) Close() error {
+	return nil
 }

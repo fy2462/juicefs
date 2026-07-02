@@ -21,7 +21,7 @@ package rdma
 import "github.com/juicedata/juicefs/pkg/cache/remote"
 
 func NewClient(options Options) remote.Client {
-	return unsupportedClient{}
+	return newClient(options)
 }
 
 func Capability() CapabilityInfo {
