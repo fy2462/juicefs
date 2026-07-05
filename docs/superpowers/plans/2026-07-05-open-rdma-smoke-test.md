@@ -10,6 +10,19 @@
 
 ---
 
+## Post-Plan Updates
+
+The implemented helper was extended after the initial plan to cover additional open-rdma readiness failures observed during local smoke runs:
+
+- `--strict` exits non-zero when readiness warnings remain.
+- A final `READY` / `NOT READY` summary is printed.
+- The current kernel build directory `/lib/modules/$(uname -r)/build` is checked.
+- Non-interactive `sudo` readiness is checked without running privileged operations.
+- Long checkout paths warn before rdma-core builds.
+- `ip`, `blue0`, and `blue1` are checked, and the documented interface IP configuration commands are printed.
+
+The shell harness now verifies seven behaviors rather than the original five.
+
 ## File Structure
 
 - Create: `hack/open-rdma-smoke-test.sh`
