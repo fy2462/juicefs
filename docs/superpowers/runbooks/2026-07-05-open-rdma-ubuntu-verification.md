@@ -81,6 +81,25 @@ smoke check summary: READY
 
 If the summary is `NOT READY`, fix the warnings before running build or loopback. Paste the full output back into the Codex thread for triage.
 
+## Troubleshooting Checklist
+
+Use this table to map smoke-test warnings to the next action on the Ubuntu host.
+
+| Smoke-test warning | What it means | Next action |
+|---|---|---|
+| `open-rdma documentation expects kernel >= 6.6` | The kernel may be too old for the driver. | Boot a kernel version 6.6 or newer before building the module. |
+| `missing kernel build directory: /lib/modules/.../build` | Matching kernel headers are missing. | Install or prepare headers for the running kernel, then rerun `make`. On WSL2-like hosts, follow upstream open-rdma WSL kernel-header guidance. |
+| `open-rdma checkout path is long` | rdma-core may fail in deep paths. | Move the checkout to a short path such as `$HOME/open-rdma-driver`. |
+| `missing command: cmake` or another command | Required build tool is missing. | Run `sudo apt install cmake pkg-config libnl-3-dev libnl-route-3-dev libclang-dev libibverbs-dev`. |
+| `missing pkg-config entry: libibverbs` | `libibverbs-dev` is missing or not visible to pkg-config. | Run `sudo apt install libibverbs-dev`. |
+| `missing pkg-config entry: libnl-3.0` | `libnl-3-dev` is missing. | Run `sudo apt install libnl-3-dev`. |
+| `missing pkg-config entry: libnl-route-3.0` | `libnl-route-3-dev` is missing. | Run `sudo apt install libnl-route-3-dev`. |
+| `kernel module is not loaded: bluerdma` | The open-rdma kernel module is not active. | From `$OPEN_RDMA_DRIVER`, run `make` and `sudo make install`, then verify `lsmod | grep bluerdma`. |
+| `blue0 interface is missing` or `blue1 interface is missing` | The module did not expose the expected virtual interfaces. | First fix `bluerdma` module loading. Then verify `ip link show blue0` and `ip link show blue1`. |
+| `huge pages may need allocation` | Huge pages are not allocated or cannot be read. | From `$OPEN_RDMA_DRIVER`, run `sudo ./scripts/hugepages.sh alloc 512`. |
+| `sudo is not available for privileged setup` | The current host or container cannot run privileged setup. | Use a real Ubuntu host, VM, or WSL2 environment with permission to install packages, load kernel modules, and allocate huge pages. |
+| `strict mode failed because smoke check is not ready` | At least one readiness warning remains. | Fix the warnings above, then rerun `hack/open-rdma-smoke-test.sh --driver-dir "$OPEN_RDMA_DRIVER" --strict`. |
+
 ## Build Check
 
 From the JuiceFS checkout:
