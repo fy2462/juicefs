@@ -115,7 +115,7 @@ check_driver_dir() {
 
 check_commands() {
   missing=""
-  for cmd in cargo cmake pkg-config make cc; do
+  for cmd in cargo cmake pkg-config make cc ip; do
     if have_cmd "$cmd"; then
       info "found command: $cmd"
     else
@@ -144,6 +144,23 @@ check_module() {
   else
     warn "kernel module is not loaded: bluerdma"
   fi
+}
+
+check_blue_interfaces() {
+  if ! have_cmd ip; then
+    warn "ip command is missing; cannot inspect blue0/blue1 interfaces"
+    return
+  fi
+  for iface in blue0 blue1; do
+    if ip link show "$iface" >/dev/null 2>&1; then
+      info "$iface interface is present"
+    else
+      warn "$iface interface is missing"
+    fi
+  done
+  info "if blue0/blue1 are present, configure them with:"
+  info "  sudo ip addr add 17.34.51.10/24 dev blue0"
+  info "  sudo ip addr add 17.34.51.11/24 dev blue1"
 }
 
 check_hugepages() {
@@ -226,6 +243,7 @@ main() {
   check_commands
   check_pkg_config
   check_module
+  check_blue_interfaces
   check_hugepages
   check_privileged_setup
   print_manual_setup
