@@ -88,6 +88,17 @@ check_linux() {
   fi
 }
 
+check_kernel_build_dir() {
+  kernel="$(uname -r)"
+  build_dir="/lib/modules/$kernel/build"
+  if [ -d "$build_dir" ]; then
+    info "kernel build directory: $build_dir"
+  else
+    warn "missing kernel build directory: $build_dir"
+    warn "open-rdma kernel module build may fail until matching kernel headers are installed"
+  fi
+}
+
 check_driver_dir() {
   [ -n "$DRIVER_DIR" ] || die "--driver-dir is required"
   [ -d "$DRIVER_DIR" ] || die "missing open-rdma checkout: $DRIVER_DIR"
@@ -143,6 +154,18 @@ check_hugepages() {
   esac
 }
 
+check_privileged_setup() {
+  if ! have_cmd sudo; then
+    warn "sudo is not available for privileged setup"
+    return
+  fi
+  if sudo -n true >/dev/null 2>&1; then
+    info "sudo can run non-interactively for privileged setup"
+  else
+    warn "sudo is not available for privileged setup without interaction or elevated container permissions"
+  fi
+}
+
 print_manual_setup() {
   cat <<EOF
 
@@ -193,11 +216,13 @@ main() {
   parse_args "$@"
   info "open-rdma smoke test"
   check_linux
+  check_kernel_build_dir
   check_driver_dir
   check_commands
   check_pkg_config
   check_module
   check_hugepages
+  check_privileged_setup
   print_manual_setup
   if [ "$DO_BUILD" -eq 1 ]; then
     build_open_rdma

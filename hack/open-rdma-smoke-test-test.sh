@@ -58,7 +58,7 @@ make_driver_dir() {
 make_fake_path() {
   bin="$1"
   mkdir -p "$bin"
-  for cmd in cargo cmake pkg-config make cc uname lsmod awk grep cat; do
+  for cmd in cargo cmake pkg-config make cc uname lsmod awk grep cat sudo; do
     cat > "$bin/$cmd" <<'EOF'
 #!/bin/sh
 case "$(basename "$0")" in
@@ -68,6 +68,10 @@ case "$(basename "$0")" in
     ;;
   pkg-config)
     exit 0
+    ;;
+  sudo)
+    echo "sudo unavailable in test"
+    exit 1
     ;;
   lsmod)
     echo "bluerdma 1 0"
@@ -127,6 +131,8 @@ make_driver_dir "$driver"
 out="$TMP_DIR/check.out"
 if run_script "$out" --driver-dir "$driver"; then
   assert_contains "$out" "open-rdma smoke test"
+  assert_contains "$out" "missing kernel build directory"
+  assert_contains "$out" "sudo is not available for privileged setup"
   assert_contains "$out" "manual privileged setup"
   assert_not_contains "$out" "cargo build"
   assert_not_contains "$out" "loopback 8192"
