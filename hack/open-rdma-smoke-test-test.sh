@@ -144,6 +144,7 @@ if run_script "$out" --driver-dir "$driver"; then
   assert_contains "$out" "sudo is not available for privileged setup"
   assert_contains "$out" "blue0 interface is present"
   assert_contains "$out" "blue1 interface is present"
+  assert_contains "$out" "smoke check summary: NOT READY"
   assert_contains "$out" "manual privileged setup"
   assert_not_contains "$out" "cargo build"
   assert_not_contains "$out" "loopback 8192"
@@ -151,6 +152,16 @@ if run_script "$out" --driver-dir "$driver"; then
 else
   cat "$out" >&2
   fail "default check failed"
+fi
+
+out="$TMP_DIR/strict.out"
+if run_script "$out" --driver-dir "$driver" --strict; then
+  cat "$out" >&2
+  fail "strict mode unexpectedly passed with warnings"
+else
+  assert_contains "$out" "smoke check summary: NOT READY"
+  assert_contains "$out" "strict mode failed because smoke check is not ready"
+  pass "strict mode fails when warnings are present"
 fi
 
 long_driver="$TMP_DIR/very-long-open-rdma-path-segment/another-long-open-rdma-path-segment/open-rdma-driver"

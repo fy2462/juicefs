@@ -4,10 +4,12 @@ set -eu
 DRIVER_DIR=""
 DO_BUILD=0
 DO_RUN=0
+DO_STRICT=0
+WARNINGS=0
 
 usage() {
   cat <<'USAGE'
-Usage: hack/open-rdma-smoke-test.sh --driver-dir /path/to/open-rdma-driver [--build] [--run]
+Usage: hack/open-rdma-smoke-test.sh --driver-dir /path/to/open-rdma-driver [--build] [--run] [--strict]
 
 Checks whether an Ubuntu/Linux host is prepared to use open-rdma mock mode
 as a future JuiceFS RDMA test provider.
@@ -16,6 +18,7 @@ Options:
   --driver-dir DIR   Path to an existing open-rdma-driver checkout
   --build            Build mock provider, rdma-core tree, and examples
   --run              Run examples/loopback 8192
+  --strict           Exit non-zero when readiness warnings are present
   --help             Show this help
 USAGE
 }
@@ -25,6 +28,7 @@ info() {
 }
 
 warn() {
+  WARNINGS=$((WARNINGS + 1))
   printf '[WARN] %s\n' "$*"
 }
 
@@ -55,6 +59,10 @@ parse_args() {
         ;;
       --run)
         DO_RUN=1
+        shift
+        ;;
+      --strict)
+        DO_STRICT=1
         shift
         ;;
       --help|-h)
@@ -201,6 +209,21 @@ manual privileged setup, run from the open-rdma checkout when needed:
 EOF
 }
 
+print_summary() {
+  if [ "$WARNINGS" -eq 0 ]; then
+    info "smoke check summary: READY"
+  else
+    warn_text="warnings"
+    if [ "$WARNINGS" -eq 1 ]; then
+      warn_text="warning"
+    fi
+    warn "smoke check summary: NOT READY ($WARNINGS $warn_text)"
+    if [ "$DO_STRICT" -eq 1 ]; then
+      die "strict mode failed because smoke check is not ready"
+    fi
+  fi
+}
+
 run_cmd() {
   info "running: $*"
   "$@"
@@ -247,6 +270,7 @@ main() {
   check_hugepages
   check_privileged_setup
   print_manual_setup
+  print_summary
   if [ "$DO_BUILD" -eq 1 ]; then
     build_open_rdma
   fi
