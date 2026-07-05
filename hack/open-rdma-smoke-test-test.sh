@@ -142,6 +142,18 @@ else
   fail "default check failed"
 fi
 
+long_driver="$TMP_DIR/very-long-open-rdma-path-segment/another-long-open-rdma-path-segment/open-rdma-driver"
+make_driver_dir "$long_driver"
+
+out="$TMP_DIR/long-path.out"
+if run_script "$out" --driver-dir "$long_driver"; then
+  assert_contains "$out" "open-rdma checkout path is long"
+  pass "long checkout path warns before rdma-core build"
+else
+  cat "$out" >&2
+  fail "long path check failed"
+fi
+
 out="$TMP_DIR/build.out"
 if run_script "$out" --driver-dir "$driver" --build; then
   assert_contains "$out" "building open-rdma mock provider"

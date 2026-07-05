@@ -106,6 +106,11 @@ check_driver_dir() {
   [ -d "$DRIVER_DIR/examples" ] || die "missing $DRIVER_DIR/examples"
   [ -f "$DRIVER_DIR/scripts/setup-env.sh" ] || die "missing $DRIVER_DIR/scripts/setup-env.sh"
   info "open-rdma checkout: $DRIVER_DIR"
+  path_len=${#DRIVER_DIR}
+  if [ "$path_len" -gt 80 ]; then
+    warn "open-rdma checkout path is long ($path_len chars); rdma-core builds may fail in deep paths"
+    warn "prefer a short path such as /home/${USER:-user}/open-rdma-driver"
+  fi
 }
 
 check_commands() {
