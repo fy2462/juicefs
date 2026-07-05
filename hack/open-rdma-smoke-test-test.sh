@@ -134,6 +134,18 @@ else
   pass "missing driver directory fails clearly"
 fi
 
+out="$TMP_DIR/evidence.out"
+if run_script "$out" --driver-dir /path/to/open-rdma-driver --evidence; then
+  assert_contains "$out" "Evidence commands to paste back"
+  assert_contains "$out" 'hack/open-rdma-smoke-test.sh --driver-dir "$OPEN_RDMA_DRIVER" --strict'
+  assert_contains "$out" 'hack/open-rdma-smoke-test.sh --driver-dir "$OPEN_RDMA_DRIVER" --build'
+  assert_contains "$out" 'hack/open-rdma-smoke-test.sh --driver-dir "$OPEN_RDMA_DRIVER" --run'
+  pass "evidence mode prints paste-back commands"
+else
+  cat "$out" >&2
+  fail "evidence command failed"
+fi
+
 driver="$TMP_DIR/open-rdma-driver"
 make_driver_dir "$driver"
 

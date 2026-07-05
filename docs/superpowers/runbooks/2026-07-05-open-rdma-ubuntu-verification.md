@@ -117,6 +117,12 @@ The command must exit 0. Paste the full `--run` output back into the Codex threa
 
 ## Evidence To Return
 
+The helper can print the evidence command list:
+
+```bash
+hack/open-rdma-smoke-test.sh --driver-dir "$OPEN_RDMA_DRIVER" --evidence
+```
+
 Paste these outputs into the thread:
 
 ```bash

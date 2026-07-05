@@ -52,9 +52,10 @@ The JuiceFS helper can then inspect the environment:
 ```bash
 hack/open-rdma-smoke-test.sh --driver-dir /path/to/open-rdma-driver
 hack/open-rdma-smoke-test.sh --driver-dir /path/to/open-rdma-driver --strict
+hack/open-rdma-smoke-test.sh --driver-dir /path/to/open-rdma-driver --evidence
 ```
 
-By default, the script is read-only. It reports checks and prints remediation commands for missing prerequisites. With `--strict`, the script exits non-zero when readiness warnings are present, which is useful for automation and for deciding whether to proceed to build and run steps.
+By default, the script is read-only. It reports checks and prints remediation commands for missing prerequisites. With `--strict`, the script exits non-zero when readiness warnings are present, which is useful for automation and for deciding whether to proceed to build and run steps. With `--evidence`, the script prints the commands whose output should be pasted back for triage.
 
 When the user intentionally wants build or run actions:
 
@@ -71,7 +72,7 @@ hack/open-rdma-smoke-test.sh --driver-dir /path/to/open-rdma-driver --run
 
 The helper script should:
 
-1. Parse `--driver-dir`, `--build`, `--run`, `--strict`, and `--help`.
+1. Parse `--driver-dir`, `--build`, `--run`, `--strict`, `--evidence`, and `--help`.
 2. Verify it is running on Linux.
 3. Print the kernel version and warn when the version is lower than 6.6.
 4. Check whether `/lib/modules/$(uname -r)/build` exists, because the open-rdma kernel module build needs matching kernel headers.
@@ -101,7 +102,8 @@ smoke check summary: NOT READY (<n> warnings)
 
 With `--strict`, `NOT READY` exits non-zero after the summary.
 
-15. When `--build` is set, run:
+15. When `--evidence` is set, print the commands whose output proves readiness, build, and runtime state.
+16. When `--build` is set, run:
 
 ```bash
 cd "$DRIVER_DIR/dtld-ibverbs"
@@ -112,7 +114,7 @@ cd "$DRIVER_DIR/examples"
 make
 ```
 
-16. When `--run` is set, run:
+17. When `--run` is set, run:
 
 ```bash
 LD_LIBRARY_PATH="$DRIVER_DIR/dtld-ibverbs/target/debug:$DRIVER_DIR/dtld-ibverbs/rdma-core-55.0/build/lib:${LD_LIBRARY_PATH:-}" \

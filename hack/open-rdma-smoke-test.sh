@@ -5,11 +5,12 @@ DRIVER_DIR=""
 DO_BUILD=0
 DO_RUN=0
 DO_STRICT=0
+DO_EVIDENCE=0
 WARNINGS=0
 
 usage() {
   cat <<'USAGE'
-Usage: hack/open-rdma-smoke-test.sh --driver-dir /path/to/open-rdma-driver [--build] [--run] [--strict]
+Usage: hack/open-rdma-smoke-test.sh --driver-dir /path/to/open-rdma-driver [--build] [--run] [--strict] [--evidence]
 
 Checks whether an Ubuntu/Linux host is prepared to use open-rdma mock mode
 as a future JuiceFS RDMA test provider.
@@ -19,6 +20,7 @@ Options:
   --build            Build mock provider, rdma-core tree, and examples
   --run              Run examples/loopback 8192
   --strict           Exit non-zero when readiness warnings are present
+  --evidence         Print commands whose output should be pasted back
   --help             Show this help
 USAGE
 }
@@ -63,6 +65,10 @@ parse_args() {
         ;;
       --strict)
         DO_STRICT=1
+        shift
+        ;;
+      --evidence)
+        DO_EVIDENCE=1
         shift
         ;;
       --help|-h)
@@ -224,6 +230,21 @@ print_summary() {
   fi
 }
 
+print_evidence_commands() {
+  cat <<'EOF'
+Evidence commands to paste back:
+
+  uname -a
+  lsmod | grep bluerdma
+  ip addr show blue0
+  ip addr show blue1
+  cat /proc/meminfo | grep Huge
+  hack/open-rdma-smoke-test.sh --driver-dir "$OPEN_RDMA_DRIVER" --strict
+  hack/open-rdma-smoke-test.sh --driver-dir "$OPEN_RDMA_DRIVER" --build
+  hack/open-rdma-smoke-test.sh --driver-dir "$OPEN_RDMA_DRIVER" --run
+EOF
+}
+
 run_cmd() {
   info "running: $*"
   "$@"
@@ -259,6 +280,10 @@ run_loopback() {
 
 main() {
   parse_args "$@"
+  if [ "$DO_EVIDENCE" -eq 1 ]; then
+    print_evidence_commands
+    exit 0
+  fi
   info "open-rdma smoke test"
   check_linux
   check_kernel_build_dir
