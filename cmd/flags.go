@@ -232,6 +232,26 @@ func dataCacheFlags() []cli.Flag {
 			Value: 1,
 			Usage: "number of remote cache nodes to use for each block",
 		},
+		&cli.IntFlag{
+			Name:  "remote-cache-fail-threshold",
+			Value: 3,
+			Usage: "consecutive remote cache node failures before marking it down",
+		},
+		&cli.StringFlag{
+			Name:  "remote-cache-node-cooldown",
+			Value: "5s",
+			Usage: "duration to skip a down remote cache node before probing it again",
+		},
+		&cli.StringFlag{
+			Name:  "remote-cache-probe-interval",
+			Value: "1s",
+			Usage: "interval for active remote cache node health probes, 0 disables background probes",
+		},
+		&cli.StringFlag{
+			Name:  "remote-cache-probe-timeout",
+			Value: "10ms",
+			Usage: "timeout for one active remote cache node health probe",
+		},
 		&cli.BoolFlag{
 			Name:  "remote-cache-fill-local",
 			Value: true,

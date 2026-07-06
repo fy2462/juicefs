@@ -45,6 +45,8 @@ type Options struct {
 	Replicas      int
 	FailThreshold int
 	NodeCooldown  time.Duration
+	ProbeInterval time.Duration
+	ProbeTimeout  time.Duration
 }
 
 func NewClient(nodes []string, timeout time.Duration) remote.Client {

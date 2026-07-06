@@ -530,44 +530,48 @@ func (s *wSlice) Abort() {
 
 // Config contains options for cachedStore
 type Config struct {
-	CacheDir               string
-	CacheMode              os.FileMode
-	CacheSize              uint64
-	CacheItems             int64
-	CacheChecksum          string
-	CacheEviction          string
-	CacheScanInterval      time.Duration
-	CacheExpire            time.Duration
-	OSCache                bool
-	FreeSpace              float32
-	AutoCreate             bool
-	Compress               string
-	MaxUpload              int
-	MaxDownload            int
-	MaxStageWrite          int
-	MaxRetries             int
-	UploadLimit            int64 // bytes per second
-	DownloadLimit          int64 // bytes per second
-	Writeback              bool
-	WritebackThresholdSize int
-	UploadDelay            time.Duration
-	UploadHours            string
-	HashPrefix             bool
-	BlockSize              int
-	GetTimeout             time.Duration
-	PutTimeout             time.Duration
-	CacheFullBlock         bool
-	CacheLargeWrite        bool
-	BufferSize             uint64
-	Readahead              int
-	Prefetch               int
-	RemoteCacheMode        string
-	RemoteCacheNodes       string
-	RemoteCacheTransport   string
-	RemoteCacheTimeout     time.Duration
-	RemoteCacheReplicas    int
-	RemoteCacheFillLocal   bool
-	RemoteCacheFillRemote  bool
+	CacheDir                 string
+	CacheMode                os.FileMode
+	CacheSize                uint64
+	CacheItems               int64
+	CacheChecksum            string
+	CacheEviction            string
+	CacheScanInterval        time.Duration
+	CacheExpire              time.Duration
+	OSCache                  bool
+	FreeSpace                float32
+	AutoCreate               bool
+	Compress                 string
+	MaxUpload                int
+	MaxDownload              int
+	MaxStageWrite            int
+	MaxRetries               int
+	UploadLimit              int64 // bytes per second
+	DownloadLimit            int64 // bytes per second
+	Writeback                bool
+	WritebackThresholdSize   int
+	UploadDelay              time.Duration
+	UploadHours              string
+	HashPrefix               bool
+	BlockSize                int
+	GetTimeout               time.Duration
+	PutTimeout               time.Duration
+	CacheFullBlock           bool
+	CacheLargeWrite          bool
+	BufferSize               uint64
+	Readahead                int
+	Prefetch                 int
+	RemoteCacheMode          string
+	RemoteCacheNodes         string
+	RemoteCacheTransport     string
+	RemoteCacheTimeout       time.Duration
+	RemoteCacheReplicas      int
+	RemoteCacheFailThreshold int
+	RemoteCacheNodeCooldown  time.Duration
+	RemoteCacheProbeInterval time.Duration
+	RemoteCacheProbeTimeout  time.Duration
+	RemoteCacheFillLocal     bool
+	RemoteCacheFillRemote    bool
 }
 
 func (c *Config) SelfCheck(uuid string) {
@@ -649,6 +653,18 @@ func (c *Config) SelfCheck(uuid string) {
 	if c.RemoteCacheReplicas <= 0 {
 		c.RemoteCacheReplicas = 1
 	}
+	if c.RemoteCacheFailThreshold <= 0 {
+		c.RemoteCacheFailThreshold = 3
+	}
+	if c.RemoteCacheNodeCooldown == 0 {
+		c.RemoteCacheNodeCooldown = 5 * time.Second
+	}
+	if c.RemoteCacheProbeInterval == 0 {
+		c.RemoteCacheProbeInterval = time.Second
+	}
+	if c.RemoteCacheProbeTimeout == 0 {
+		c.RemoteCacheProbeTimeout = defaultRemoteCacheProbeTimeout(c.RemoteCacheTimeout)
+	}
 	if c.CacheEviction == "" {
 		c.CacheEviction = Eviction2Random
 	} else if c.CacheEviction != Eviction2Random && c.CacheEviction != EvictionNone && c.CacheEviction != EvictionLRU {
@@ -663,6 +679,13 @@ func (c *Config) SelfCheck(uuid string) {
 		logger.Warnf("cache-expire it too short, setting it to 1 second")
 		c.CacheExpire = time.Second
 	}
+}
+
+func defaultRemoteCacheProbeTimeout(remoteTimeout time.Duration) time.Duration {
+	if remoteTimeout > 0 && remoteTimeout < 10*time.Millisecond {
+		return remoteTimeout
+	}
+	return 10 * time.Millisecond
 }
 
 func (c *Config) parseHours() (start, end int, err error) {
@@ -960,6 +983,18 @@ func NewCachedStore(storage object.ObjectStorage, config Config, reg prometheus.
 	if config.RemoteCacheReplicas <= 0 {
 		config.RemoteCacheReplicas = 1
 	}
+	if config.RemoteCacheFailThreshold <= 0 {
+		config.RemoteCacheFailThreshold = 3
+	}
+	if config.RemoteCacheNodeCooldown == 0 {
+		config.RemoteCacheNodeCooldown = 5 * time.Second
+	}
+	if config.RemoteCacheProbeInterval == 0 {
+		config.RemoteCacheProbeInterval = time.Second
+	}
+	if config.RemoteCacheProbeTimeout == 0 {
+		config.RemoteCacheProbeTimeout = defaultRemoteCacheProbeTimeout(config.RemoteCacheTimeout)
+	}
 	store := &cachedStore{
 		storage:         storage,
 		conf:            config,
@@ -980,15 +1015,23 @@ func NewCachedStore(storage object.ObjectStorage, config Config, reg prometheus.
 			switch config.RemoteCacheTransport {
 			case "rdma":
 				store.remoteCache = rdma.NewClient(rdma.Options{
-					Nodes:    nodes,
-					Timeout:  config.RemoteCacheTimeout,
-					Replicas: config.RemoteCacheReplicas,
+					Nodes:         nodes,
+					Timeout:       config.RemoteCacheTimeout,
+					Replicas:      config.RemoteCacheReplicas,
+					FailThreshold: config.RemoteCacheFailThreshold,
+					NodeCooldown:  config.RemoteCacheNodeCooldown,
+					ProbeInterval: config.RemoteCacheProbeInterval,
+					ProbeTimeout:  config.RemoteCacheProbeTimeout,
 				})
 			default:
 				store.remoteCache = httpcache.NewClientWithOptions(httpcache.Options{
-					Nodes:    nodes,
-					Timeout:  config.RemoteCacheTimeout,
-					Replicas: config.RemoteCacheReplicas,
+					Nodes:         nodes,
+					Timeout:       config.RemoteCacheTimeout,
+					Replicas:      config.RemoteCacheReplicas,
+					FailThreshold: config.RemoteCacheFailThreshold,
+					NodeCooldown:  config.RemoteCacheNodeCooldown,
+					ProbeInterval: config.RemoteCacheProbeInterval,
+					ProbeTimeout:  config.RemoteCacheProbeTimeout,
 				})
 			}
 		}

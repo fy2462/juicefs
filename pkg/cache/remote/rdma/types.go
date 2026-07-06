@@ -44,6 +44,8 @@ type Options struct {
 	Dialer        Dialer
 	FailThreshold int
 	NodeCooldown  time.Duration
+	ProbeInterval time.Duration
+	ProbeTimeout  time.Duration
 }
 
 type Conn interface {

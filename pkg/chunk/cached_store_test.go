@@ -421,6 +421,10 @@ func TestRemoteCacheConfigValidation(t *testing.T) {
 
 	require.Equal(t, "none", conf.RemoteCacheMode)
 	require.Equal(t, 50*time.Millisecond, conf.RemoteCacheTimeout)
+	require.Equal(t, 3, conf.RemoteCacheFailThreshold)
+	require.Equal(t, 5*time.Second, conf.RemoteCacheNodeCooldown)
+	require.Equal(t, time.Second, conf.RemoteCacheProbeInterval)
+	require.Equal(t, 10*time.Millisecond, conf.RemoteCacheProbeTimeout)
 }
 
 type countingStore struct {
