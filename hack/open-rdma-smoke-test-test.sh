@@ -61,7 +61,8 @@ make_fake_path() {
   for cmd in cargo cmake pkg-config make cc uname lsmod awk grep cat sudo ip; do
     cat > "$bin/$cmd" <<'EOF'
 #!/bin/sh
-case "$(basename "$0")" in
+cmd_name="${0##*/}"
+case "$cmd_name" in
   uname)
     if [ "${1:-}" = "-s" ]; then echo Linux; exit 0; fi
     if [ "${1:-}" = "-r" ]; then echo 6.8.0-test; exit 0; fi
@@ -103,7 +104,7 @@ case "$(basename "$0")" in
     exit 0
     ;;
 esac
-exec "/usr/bin/$(basename "$0")" "$@"
+exec "/usr/bin/$cmd_name" "$@"
 EOF
     chmod +x "$bin/$cmd"
   done
@@ -125,6 +126,12 @@ run_script() {
   out="$1"
   shift
   PATH="$TMP_DIR/bin:$PATH" "$SCRIPT" "$@" >"$out" 2>&1
+}
+
+run_script_clean_path() {
+  out="$1"
+  shift
+  PATH="$TMP_DIR/bin" "$SCRIPT" "$@" >"$out" 2>&1
 }
 
 rm -rf "$TMP_DIR"
@@ -265,6 +272,34 @@ else
   cat "$out" >&2
   fail "run mode failed"
 fi
+
+printf '#!/bin/sh\necho "loopback failed before transfer"\nexit 42\n' > "$driver/examples/loopback"
+chmod +x "$driver/examples/loopback"
+
+out="$TMP_DIR/run-failure.out"
+if run_script "$out" --driver-dir "$driver" --run; then
+  cat "$out" >&2
+  fail "run mode unexpectedly passed when loopback failed"
+else
+  assert_contains "$out" "loopback failed before transfer"
+  pass "run mode surfaces loopback failure output"
+fi
+
+printf '#!/bin/sh\necho loopback "$@"\n' > "$driver/examples/loopback"
+chmod +x "$driver/examples/loopback"
+rm -f "$TMP_DIR/bin/timeout"
+
+out="$TMP_DIR/run-missing-timeout.out"
+if run_script_clean_path "$out" --driver-dir "$driver" --run; then
+  cat "$out" >&2
+  fail "run mode unexpectedly passed without timeout command"
+else
+  assert_contains "$out" "missing command: timeout"
+  pass "run mode fails clearly when timeout command is missing"
+fi
+
+make_fake_path "$TMP_DIR/bin"
+make_fake_uname_kernel "$TMP_DIR/bin" "$(/usr/bin/uname -r)"
 
 printf '#!/bin/sh\necho "round: 1,No differences found between the two memory regions."\necho "received bytes count: 8192"\nexit 124\n' > "$driver/examples/loopback"
 chmod +x "$driver/examples/loopback"

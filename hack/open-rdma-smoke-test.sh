@@ -129,7 +129,7 @@ check_driver_dir() {
 
 check_commands() {
   missing=""
-  for cmd in cargo cmake pkg-config make cc ip; do
+  for cmd in cargo cmake pkg-config make cc ip timeout; do
     if have_cmd "$cmd"; then
       info "found command: $cmd"
     else
@@ -290,6 +290,7 @@ build_open_rdma() {
 run_loopback() {
   loopback="$DRIVER_DIR/examples/loopback"
   [ -x "$loopback" ] || die "missing executable example: $loopback"
+  have_cmd timeout || die "missing command: timeout"
   timeout_seconds="${OPEN_RDMA_LOOPBACK_TIMEOUT:-10s}"
   output="${TMPDIR:-/tmp}/open-rdma-loopback.$$.out"
   info "running open-rdma loopback example"
