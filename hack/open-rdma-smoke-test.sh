@@ -177,6 +177,18 @@ check_blue_interfaces() {
   info "  sudo ip addr add 17.34.51.11/24 dev blue1"
 }
 
+check_mock_target_route() {
+  if ! have_cmd ip; then
+    return
+  fi
+  if ip route get 17.34.51.10 2>/dev/null | grep '^local ' >/dev/null 2>&1; then
+    info "open-rdma mock target route is local: 17.34.51.10"
+  else
+    warn "open-rdma mock target 17.34.51.10 is not routed locally"
+    warn "configure a local route before --run, for example: sudo ip addr add 17.34.51.10/32 dev lo"
+  fi
+}
+
 check_hugepages() {
   hugepages="unknown"
   if [ -r /proc/sys/vm/nr_hugepages ]; then
@@ -191,6 +203,10 @@ check_hugepages() {
 }
 
 check_privileged_setup() {
+  if [ "$WARNINGS" -eq 0 ]; then
+    info "privileged setup is not required"
+    return
+  fi
   if ! have_cmd sudo; then
     warn "sudo is not available for privileged setup"
     return
@@ -210,6 +226,7 @@ manual privileged setup, run from the open-rdma checkout when needed:
   sudo apt install cmake pkg-config libnl-3-dev libnl-route-3-dev libclang-dev libibverbs-dev
   make
   sudo make install
+  sudo ip addr add 17.34.51.10/32 dev lo
   sudo ./scripts/hugepages.sh alloc 512
 
 EOF
@@ -273,9 +290,34 @@ build_open_rdma() {
 run_loopback() {
   loopback="$DRIVER_DIR/examples/loopback"
   [ -x "$loopback" ] || die "missing executable example: $loopback"
+  timeout_seconds="${OPEN_RDMA_LOOPBACK_TIMEOUT:-10s}"
+  output="${TMPDIR:-/tmp}/open-rdma-loopback.$$.out"
   info "running open-rdma loopback example"
+  set +e
   LD_LIBRARY_PATH="$DRIVER_DIR/dtld-ibverbs/target/debug:$DRIVER_DIR/dtld-ibverbs/rdma-core-55.0/build/lib:${LD_LIBRARY_PATH:-}" \
-    "$loopback" 8192
+    timeout "$timeout_seconds" "$loopback" 8192 >"$output" 2>&1
+  status=$?
+  set -e
+
+  if [ "$status" -eq 0 ]; then
+    cat "$output"
+    rm -f "$output"
+    return
+  fi
+
+  if [ "$status" -eq 124 ] &&
+    grep -F "No differences found between the two memory regions." "$output" >/dev/null 2>&1 &&
+    grep -F "received bytes count: 8192" "$output" >/dev/null 2>&1; then
+    info "loopback produced a successful RDMA write before timeout"
+    grep -m 1 -F "No differences found between the two memory regions." "$output"
+    grep -m 1 -F "received bytes count: 8192" "$output"
+    rm -f "$output"
+    return
+  fi
+
+  cat "$output" >&2
+  rm -f "$output"
+  return "$status"
 }
 
 main() {
@@ -292,6 +334,7 @@ main() {
   check_pkg_config
   check_module
   check_blue_interfaces
+  check_mock_target_route
   check_hugepages
   check_privileged_setup
   print_manual_setup

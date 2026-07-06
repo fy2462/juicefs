@@ -78,6 +78,10 @@ case "$(basename "$0")" in
     exit 0
     ;;
   ip)
+    if [ "${1:-}" = "route" ] && [ "${2:-}" = "get" ] && [ "${3:-}" = "17.34.51.10" ]; then
+      echo "local 17.34.51.10 dev lo src 17.34.51.10"
+      exit 0
+    fi
     if [ "${1:-}" = "link" ] && [ "${2:-}" = "show" ]; then
       if [ "${3:-}" = "blue0" ] || [ "${3:-}" = "blue1" ]; then
         echo "7: ${3}: <BROADCAST,MULTICAST> mtu 1500"
@@ -103,6 +107,18 @@ exec "/usr/bin/$(basename "$0")" "$@"
 EOF
     chmod +x "$bin/$cmd"
   done
+}
+
+make_fake_uname_kernel() {
+  bin="$1"
+  kernel="$2"
+  cat > "$bin/uname" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = "-s" ]; then echo Linux; exit 0; fi
+if [ "\${1:-}" = "-r" ]; then echo "$kernel"; exit 0; fi
+exec /usr/bin/uname "\$@"
+EOF
+  chmod +x "$bin/uname"
 }
 
 run_script() {
@@ -176,6 +192,47 @@ else
   pass "strict mode fails when warnings are present"
 fi
 
+out="$TMP_DIR/ready-without-sudo.out"
+make_fake_uname_kernel "$TMP_DIR/bin" "$(/usr/bin/uname -r)"
+if run_script "$out" --driver-dir "$driver" --strict; then
+  assert_contains "$out" "smoke check summary: READY"
+  assert_contains "$out" "open-rdma mock target route is local: 17.34.51.10"
+  assert_not_contains "$out" "sudo is not available for privileged setup"
+  pass "strict mode passes when runtime prerequisites are ready without sudo"
+else
+  cat "$out" >&2
+  fail "strict mode should pass when runtime prerequisites are ready without sudo"
+fi
+
+cat > "$TMP_DIR/bin/ip" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "link" ] && [ "${2:-}" = "show" ]; then
+  if [ "${3:-}" = "blue0" ] || [ "${3:-}" = "blue1" ]; then
+    echo "7: ${3}: <BROADCAST,MULTICAST> mtu 1500"
+    exit 0
+  fi
+fi
+if [ "${1:-}" = "route" ] && [ "${2:-}" = "get" ] && [ "${3:-}" = "17.34.51.10" ]; then
+  echo "17.34.51.10 via 10.211.55.1 dev enp0s5 src 10.211.55.4"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$TMP_DIR/bin/ip"
+
+out="$TMP_DIR/non-local-route.out"
+if run_script "$out" --driver-dir "$driver" --strict; then
+  cat "$out" >&2
+  fail "strict mode unexpectedly passed with non-local mock target route"
+else
+  assert_contains "$out" "open-rdma mock target 17.34.51.10 is not routed locally"
+  assert_contains "$out" "strict mode failed because smoke check is not ready"
+  pass "strict mode fails when mock target route is not local"
+fi
+
+make_fake_path "$TMP_DIR/bin"
+make_fake_uname_kernel "$TMP_DIR/bin" "$(/usr/bin/uname -r)"
+
 long_driver="$TMP_DIR/very-long-open-rdma-path-segment/another-long-open-rdma-path-segment/open-rdma-driver"
 make_driver_dir "$long_driver"
 
@@ -207,6 +264,19 @@ if run_script "$out" --driver-dir "$driver" --run; then
 else
   cat "$out" >&2
   fail "run mode failed"
+fi
+
+printf '#!/bin/sh\necho "round: 1,No differences found between the two memory regions."\necho "received bytes count: 8192"\nexit 124\n' > "$driver/examples/loopback"
+chmod +x "$driver/examples/loopback"
+
+out="$TMP_DIR/run-timeout-success.out"
+if run_script "$out" --driver-dir "$driver" --run; then
+  assert_contains "$out" "loopback produced a successful RDMA write before timeout"
+  assert_contains "$out" "received bytes count: 8192"
+  pass "run mode treats timed-out successful loopback as pass"
+else
+  cat "$out" >&2
+  fail "run mode should pass when loopback reports success before timeout"
 fi
 
 echo "passed $TESTS_RUN tests"
