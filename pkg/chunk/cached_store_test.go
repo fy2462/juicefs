@@ -451,6 +451,24 @@ func (f failingRemoteCache) Close() error {
 	return nil
 }
 
+type unavailableRemoteCache struct{}
+
+func (u unavailableRemoteCache) Get(ctx context.Context, key string, off, size int) (io.ReadCloser, error) {
+	return nil, remote.ErrUnavailable
+}
+
+func (u unavailableRemoteCache) Put(ctx context.Context, key string, data []byte) error {
+	return remote.ErrUnavailable
+}
+
+func (u unavailableRemoteCache) Delete(ctx context.Context, key string) error {
+	return remote.ErrUnavailable
+}
+
+func (u unavailableRemoteCache) Close() error {
+	return nil
+}
+
 type missPutFailingRemoteCache struct{}
 
 func (f missPutFailingRemoteCache) Get(ctx context.Context, key string, off, size int) (io.ReadCloser, error) {
@@ -605,6 +623,24 @@ func TestRemoteCacheErrorFallsBackToObjectStorage(t *testing.T) {
 	p := NewPage(make([]byte, 4))
 	defer p.Release()
 	require.NoError(t, store.load(context.Background(), "chunks/0/0/125_0_4", p, false, false))
+	require.Equal(t, []byte("safe"), p.Data)
+	require.Equal(t, int32(1), counting.gets.Load())
+}
+
+func TestRemoteCacheUnavailableFallsBackToObjectStorage(t *testing.T) {
+	blob, _ := object.CreateStorage("mem", "", "", "", "")
+	key := "chunks/0/0/135_0_4"
+	require.NoError(t, blob.Put(context.Background(), key, bytes.NewReader([]byte("safe"))))
+	counting := &countingStore{ObjectStorage: blob}
+	conf := defaultConf
+	conf.CacheSize = 0
+	conf.RemoteCacheMode = "mock"
+	store := NewCachedStore(counting, conf, nil).(*cachedStore)
+	store.remoteCache = unavailableRemoteCache{}
+
+	p := NewPage(make([]byte, 4))
+	defer p.Release()
+	require.NoError(t, store.load(context.Background(), key, p, false, false))
 	require.Equal(t, []byte("safe"), p.Data)
 	require.Equal(t, int32(1), counting.gets.Load())
 }

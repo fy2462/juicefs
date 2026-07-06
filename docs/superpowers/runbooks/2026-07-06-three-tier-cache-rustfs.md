@@ -37,6 +37,15 @@ can be read:
 Because Client B has a fresh L1 and L3 is offline, a successful final read proves
 the data came from L2 remote cache.
 
+The smoke also validates the opposite fallback direction:
+
+1. A file is written while RustFS L3 and the L2 remote cache server are running.
+2. The L2 remote cache server is stopped.
+3. A client with a fresh L1 reads the file successfully from RustFS.
+4. RustFS is then stopped too.
+5. Another fresh-L1 read is expected to fail, proving the previous success came
+   from L3 fallback rather than hidden local cache state.
+
 ## Tier Meaning
 
 - L1 is the JuiceFS local cache directory created under the smoke temporary

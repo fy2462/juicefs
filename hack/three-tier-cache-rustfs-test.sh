@@ -336,6 +336,77 @@ run_three_tier_read_path() {
   unmount_jfs "$mountpoint" "$mount_pid"
 }
 
+run_l2_down_fallback_path() {
+  meta="$TMP_DIR/l2-down-meta.db"
+  mountpoint="$TMP_DIR/l2-down-mnt"
+  l1a="$TMP_DIR/l2-down-l1-a"
+  l1b="$TMP_DIR/l2-down-l1-b"
+  l1c="$TMP_DIR/l2-down-l1-c"
+  mkdir -p "$mountpoint" "$l1a" "$l1b" "$l1c"
+
+  start_rustfs
+
+  "$ROOT_DIR/juicefs" format \
+    --storage s3 \
+    --bucket "$RUSTFS_BUCKET_URL" \
+    --access-key "$RUSTFS_ACCESS_KEY" \
+    --secret-key "$RUSTFS_SECRET_KEY" \
+    --trash-days 0 \
+    "sqlite3://$meta" l2-down-jfs
+
+  "$ROOT_DIR/juicefs" mount \
+    --cache-dir "$l1a" \
+    --cache-size 64 \
+    --remote-cache rdma \
+    --remote-cache-transport http \
+    --remote-cache-nodes 127.0.0.1:9568 \
+    --remote-cache-fill-local=true \
+    --remote-cache-fill-remote=true \
+    "sqlite3://$meta" "$mountpoint" &
+  mount_pid=$!
+  wait_for_mount "$mountpoint"
+  printf 'l2-down-fallback\n' > "$mountpoint/payload.txt"
+  sync
+  unmount_jfs "$mountpoint" "$mount_pid"
+
+  stop_remote_cache_server
+
+  "$ROOT_DIR/juicefs" mount \
+    --cache-dir "$l1b" \
+    --cache-size 64 \
+    --remote-cache rdma \
+    --remote-cache-transport http \
+    --remote-cache-nodes 127.0.0.1:9568 \
+    --remote-cache-timeout 25ms \
+    --remote-cache-fill-local=true \
+    --remote-cache-fill-remote=true \
+    "sqlite3://$meta" "$mountpoint" &
+  mount_pid=$!
+  wait_for_mount "$mountpoint"
+  wait_for_path "$mountpoint/payload.txt"
+  grep -F 'l2-down-fallback' "$mountpoint/payload.txt" >/dev/null
+  unmount_jfs "$mountpoint" "$mount_pid"
+
+  stop_rustfs
+  wait_for_http_down 127.0.0.1 9000
+
+  "$ROOT_DIR/juicefs" mount \
+    --cache-dir "$l1c" \
+    --cache-size 64 \
+    --remote-cache rdma \
+    --remote-cache-transport http \
+    --remote-cache-nodes 127.0.0.1:9568 \
+    --remote-cache-timeout 25ms \
+    "sqlite3://$meta" "$mountpoint" &
+  mount_pid=$!
+  wait_for_mount "$mountpoint"
+  if grep -F 'l2-down-fallback' "$mountpoint/payload.txt" >/dev/null 2>&1; then
+    unmount_jfs "$mountpoint" "$mount_pid"
+    fail "l2-down fallback read unexpectedly succeeded after rustfs stopped"
+  fi
+  unmount_jfs "$mountpoint" "$mount_pid"
+}
+
 main() {
   rm -rf "$TMP_DIR"
   mkdir -p "$TMP_DIR"
@@ -355,6 +426,8 @@ main() {
   pass "remote cache server starts"
   run_three_tier_read_path
   pass "three-tier read path returns data with fresh L1 after rustfs stops"
+  run_l2_down_fallback_path
+  pass "read falls back to rustfs when remote cache server is down"
   echo "passed $TESTS_RUN tests"
 }
 
