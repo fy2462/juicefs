@@ -31,6 +31,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juicedata/juicefs/pkg/cache/remote"
 	"github.com/juicedata/juicefs/pkg/cache/remote/httpcache"
 	"github.com/juicedata/juicefs/pkg/cache/remote/mock"
 	"github.com/juicedata/juicefs/pkg/object"
@@ -450,6 +451,24 @@ func (f failingRemoteCache) Close() error {
 	return nil
 }
 
+type missPutFailingRemoteCache struct{}
+
+func (f missPutFailingRemoteCache) Get(ctx context.Context, key string, off, size int) (io.ReadCloser, error) {
+	return nil, remote.ErrMiss
+}
+
+func (f missPutFailingRemoteCache) Put(ctx context.Context, key string, data []byte) error {
+	return errors.New("remote cache put failed")
+}
+
+func (f missPutFailingRemoteCache) Delete(ctx context.Context, key string) error {
+	return nil
+}
+
+func (f missPutFailingRemoteCache) Close() error {
+	return nil
+}
+
 func TestRemoteCacheHitAvoidsObjectStorage(t *testing.T) {
 	blob, _ := object.CreateStorage("mem", "", "", "", "")
 	counting := &countingStore{ObjectStorage: blob}
@@ -468,9 +487,59 @@ func TestRemoteCacheHitAvoidsObjectStorage(t *testing.T) {
 	require.Equal(t, int32(0), counting.gets.Load())
 }
 
+func TestRemoteCacheHitFillsLocalCacheWhenEnabled(t *testing.T) {
+	blob, _ := object.CreateStorage("mem", "", "", "", "")
+	counting := &countingStore{ObjectStorage: blob}
+	conf := defaultConf
+	conf.CacheDir = "memory"
+	conf.RemoteCacheMode = "mock"
+	conf.RemoteCacheFillLocal = true
+	store := NewCachedStore(counting, conf, nil).(*cachedStore)
+
+	key := "chunks/0/0/131_0_4"
+	require.NoError(t, store.remoteCache.Put(context.Background(), key, []byte("warm")))
+
+	p := NewPage(make([]byte, 4))
+	defer p.Release()
+	require.NoError(t, store.load(context.Background(), key, p, true, false))
+	require.Equal(t, []byte("warm"), p.Data)
+	require.Equal(t, int32(0), counting.gets.Load())
+
+	cached, err := store.bcache.load(key)
+	require.NoError(t, err)
+	defer cached.Close()
+	cachedData := make([]byte, 4)
+	_, err = cached.ReadAt(cachedData, 0)
+	require.NoError(t, err)
+	require.Equal(t, []byte("warm"), cachedData)
+}
+
+func TestRemoteCacheHitDoesNotFillLocalCacheWhenDisabled(t *testing.T) {
+	blob, _ := object.CreateStorage("mem", "", "", "", "")
+	counting := &countingStore{ObjectStorage: blob}
+	conf := defaultConf
+	conf.CacheDir = "memory"
+	conf.RemoteCacheMode = "mock"
+	conf.RemoteCacheFillLocal = false
+	store := NewCachedStore(counting, conf, nil).(*cachedStore)
+
+	key := "chunks/0/0/132_0_4"
+	require.NoError(t, store.remoteCache.Put(context.Background(), key, []byte("skip")))
+
+	p := NewPage(make([]byte, 4))
+	defer p.Release()
+	require.NoError(t, store.load(context.Background(), key, p, true, false))
+	require.Equal(t, []byte("skip"), p.Data)
+	require.Equal(t, int32(0), counting.gets.Load())
+
+	_, err := store.bcache.load(key)
+	require.ErrorIs(t, err, errNotCached)
+}
+
 func TestRemoteCacheMissFallsBackToObjectStorageAndFillsRemote(t *testing.T) {
 	blob, _ := object.CreateStorage("mem", "", "", "", "")
-	require.NoError(t, blob.Put(context.Background(), "chunks/0/0/124_0_4", bytes.NewReader([]byte("cold"))))
+	key := "chunks/0/0/124_0_4"
+	require.NoError(t, blob.Put(context.Background(), key, bytes.NewReader([]byte("cold"))))
 	counting := &countingStore{ObjectStorage: blob}
 	conf := defaultConf
 	conf.CacheSize = 0
@@ -480,16 +549,47 @@ func TestRemoteCacheMissFallsBackToObjectStorageAndFillsRemote(t *testing.T) {
 
 	p := NewPage(make([]byte, 4))
 	defer p.Release()
-	require.NoError(t, store.load(context.Background(), "chunks/0/0/124_0_4", p, false, false))
+	require.NoError(t, store.load(context.Background(), key, p, false, false))
 	require.Equal(t, []byte("cold"), p.Data)
 	require.Equal(t, int32(1), counting.gets.Load())
 
 	require.Eventually(t, func() bool {
-		p2 := NewPage(make([]byte, 4))
-		defer p2.Release()
-		err := store.load(context.Background(), "chunks/0/0/124_0_4", p2, false, false)
-		return err == nil && bytes.Equal([]byte("cold"), p2.Data) && counting.gets.Load() == 1
+		in, err := store.remoteCache.Get(context.Background(), key, 0, 4)
+		if err != nil {
+			return false
+		}
+		defer in.Close()
+		data, err := io.ReadAll(in)
+		return err == nil && bytes.Equal([]byte("cold"), data)
 	}, time.Second, 10*time.Millisecond)
+	require.Equal(t, int32(1), counting.gets.Load())
+}
+
+func TestRemoteCacheMissDoesNotFillRemoteWhenDisabled(t *testing.T) {
+	blob, _ := object.CreateStorage("mem", "", "", "", "")
+	key := "chunks/0/0/133_0_4"
+	require.NoError(t, blob.Put(context.Background(), key, bytes.NewReader([]byte("cold"))))
+	counting := &countingStore{ObjectStorage: blob}
+	conf := defaultConf
+	conf.CacheSize = 0
+	conf.RemoteCacheMode = "mock"
+	conf.RemoteCacheFillRemote = false
+	store := NewCachedStore(counting, conf, nil).(*cachedStore)
+
+	p := NewPage(make([]byte, 4))
+	defer p.Release()
+	require.NoError(t, store.load(context.Background(), key, p, false, false))
+	require.Equal(t, []byte("cold"), p.Data)
+	require.Equal(t, int32(1), counting.gets.Load())
+
+	p2 := NewPage(make([]byte, 4))
+	defer p2.Release()
+	require.NoError(t, store.load(context.Background(), key, p2, false, false))
+	require.Equal(t, []byte("cold"), p2.Data)
+	require.Equal(t, int32(2), counting.gets.Load())
+
+	_, err := store.remoteCache.Get(context.Background(), key, 0, 4)
+	require.ErrorIs(t, err, remote.ErrMiss)
 }
 
 func TestRemoteCacheErrorFallsBackToObjectStorage(t *testing.T) {
@@ -505,6 +605,25 @@ func TestRemoteCacheErrorFallsBackToObjectStorage(t *testing.T) {
 	p := NewPage(make([]byte, 4))
 	defer p.Release()
 	require.NoError(t, store.load(context.Background(), "chunks/0/0/125_0_4", p, false, false))
+	require.Equal(t, []byte("safe"), p.Data)
+	require.Equal(t, int32(1), counting.gets.Load())
+}
+
+func TestRemoteCachePutErrorDoesNotFailObjectStorageRead(t *testing.T) {
+	blob, _ := object.CreateStorage("mem", "", "", "", "")
+	key := "chunks/0/0/134_0_4"
+	require.NoError(t, blob.Put(context.Background(), key, bytes.NewReader([]byte("safe"))))
+	counting := &countingStore{ObjectStorage: blob}
+	conf := defaultConf
+	conf.CacheSize = 0
+	conf.RemoteCacheMode = "mock"
+	conf.RemoteCacheFillRemote = true
+	store := NewCachedStore(counting, conf, nil).(*cachedStore)
+	store.remoteCache = missPutFailingRemoteCache{}
+
+	p := NewPage(make([]byte, 4))
+	defer p.Release()
+	require.NoError(t, store.load(context.Background(), key, p, false, false))
 	require.Equal(t, []byte("safe"), p.Data)
 	require.Equal(t, int32(1), counting.gets.Load())
 }
