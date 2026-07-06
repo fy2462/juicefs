@@ -6,6 +6,7 @@ TMP_DIR="${TMPDIR:-/tmp}/jfs-three-tier-cache-rustfs.$$"
 TESTS_RUN=0
 
 cleanup() {
+  stop_remote_cache_server
   stop_rustfs
   rm -rf "$TMP_DIR"
 }
@@ -163,6 +164,26 @@ stop_rustfs() {
   fi
 }
 
+start_remote_cache_server() {
+  remote_dir="$TMP_DIR/l2-cache"
+  remote_log="$TMP_DIR/rdma-cache-server.log"
+  mkdir -p "$remote_dir"
+  "$ROOT_DIR/juicefs" rdma-cache-server \
+    --listen 127.0.0.1:9568 \
+    --transport http \
+    --cache-dir "$remote_dir" \
+    --cache-size 64M >"$remote_log" 2>&1 &
+  REMOTE_CACHE_PID=$!
+  export REMOTE_CACHE_PID
+}
+
+stop_remote_cache_server() {
+  if [ -n "${REMOTE_CACHE_PID:-}" ]; then
+    kill "$REMOTE_CACHE_PID" 2>/dev/null || true
+    wait "$REMOTE_CACHE_PID" 2>/dev/null || true
+  fi
+}
+
 run_s3_baseline() {
   meta="$TMP_DIR/meta.db"
   mountpoint="$TMP_DIR/mnt"
@@ -216,6 +237,9 @@ main() {
   start_rustfs
   run_s3_baseline
   pass "rustfs S3 baseline survives remount"
+  start_remote_cache_server
+  wait_for_http 127.0.0.1 9568
+  pass "remote cache server starts"
   echo "passed $TESTS_RUN tests"
 }
 
