@@ -223,6 +223,56 @@ run_s3_baseline() {
   wait "$mount_pid" 2>/dev/null || true
 }
 
+run_three_tier_read_path() {
+  meta="$TMP_DIR/three-tier-meta.db"
+  mountpoint="$TMP_DIR/three-tier-mnt"
+  l1a="$TMP_DIR/l1-client-a"
+  l1b="$TMP_DIR/l1-client-b"
+  mkdir -p "$mountpoint" "$l1a" "$l1b"
+
+  "$ROOT_DIR/juicefs" format \
+    --storage s3 \
+    --bucket "$RUSTFS_BUCKET_URL" \
+    --access-key "$RUSTFS_ACCESS_KEY" \
+    --secret-key "$RUSTFS_SECRET_KEY" \
+    --trash-days 0 \
+    "sqlite3://$meta" three-tier-jfs
+
+  "$ROOT_DIR/juicefs" mount \
+    --cache-dir "$l1a" \
+    --cache-size 64 \
+    --remote-cache rdma \
+    --remote-cache-transport http \
+    --remote-cache-nodes 127.0.0.1:9568 \
+    --remote-cache-fill-local=true \
+    --remote-cache-fill-remote=true \
+    "sqlite3://$meta" "$mountpoint" &
+  mount_pid=$!
+  wait_for_mount "$mountpoint"
+  dd if=/dev/zero bs=1048576 count=1 2>/dev/null | tr '\000' 'A' > "$mountpoint/blob.bin"
+  sync
+  cat "$mountpoint/blob.bin" >/dev/null
+  "$ROOT_DIR/juicefs" umount "$mountpoint"
+  wait "$mount_pid" 2>/dev/null || true
+
+  "$ROOT_DIR/juicefs" mount \
+    --cache-dir "$l1b" \
+    --cache-size 64 \
+    --remote-cache rdma \
+    --remote-cache-transport http \
+    --remote-cache-nodes 127.0.0.1:9568 \
+    --remote-cache-fill-local=true \
+    --remote-cache-fill-remote=true \
+    "sqlite3://$meta" "$mountpoint" &
+  mount_pid=$!
+  wait_for_mount "$mountpoint"
+  wait_for_path "$mountpoint/blob.bin"
+  size="$(wc -c < "$mountpoint/blob.bin" | tr -d ' ')"
+  [ "$size" = "1048576" ] || fail "unexpected blob size from three-tier read: $size"
+  "$ROOT_DIR/juicefs" umount "$mountpoint"
+  wait "$mount_pid" 2>/dev/null || true
+}
+
 main() {
   rm -rf "$TMP_DIR"
   mkdir -p "$TMP_DIR"
@@ -240,6 +290,8 @@ main() {
   start_remote_cache_server
   wait_for_http 127.0.0.1 9568
   pass "remote cache server starts"
+  run_three_tier_read_path
+  pass "three-tier read path returns data with fresh L1"
   echo "passed $TESTS_RUN tests"
 }
 
