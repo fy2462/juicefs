@@ -24,6 +24,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juicedata/juicefs/pkg/cache/remote"
+	"github.com/juicedata/juicefs/pkg/cache/remote/cluster"
 	"github.com/juicedata/juicefs/pkg/cache/remote/rdma/protocol"
 )
 
@@ -36,10 +38,12 @@ type CapabilityInfo struct {
 }
 
 type Options struct {
-	Nodes    []string
-	Timeout  time.Duration
-	Replicas int
-	Dialer   Dialer
+	Nodes         []string
+	Timeout       time.Duration
+	Replicas      int
+	Dialer        Dialer
+	FailThreshold int
+	NodeCooldown  time.Duration
 }
 
 type Conn interface {
@@ -52,10 +56,12 @@ type Dialer interface {
 }
 
 type Client struct {
-	options Options
-	mu      sync.Mutex
-	conn    Conn
-	closed  bool
+	options   Options
+	placement *cluster.Placement
+	health    *cluster.Health
+	mu        sync.Mutex
+	conns     map[string]Conn
+	closed    bool
 }
 
 type unsupportedDialer struct{}
@@ -64,7 +70,15 @@ func newClient(options Options) *Client {
 	if options.Dialer == nil {
 		options.Dialer = unsupportedDialer{}
 	}
-	return &Client{options: options}
+	return &Client{
+		options:   options,
+		placement: cluster.NewPlacement(options.Nodes, options.Replicas),
+		health: cluster.NewHealth(cluster.Options{
+			FailThreshold: options.FailThreshold,
+			Cooldown:      options.NodeCooldown,
+		}),
+		conns: make(map[string]Conn),
+	}
 }
 
 func (unsupportedDialer) Dial(ctx context.Context, node string, options Options) (Conn, error) {
@@ -109,36 +123,74 @@ func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.closed = true
-	if c.conn != nil {
-		return c.conn.Close()
+	var err error
+	for _, conn := range c.conns {
+		if e := conn.Close(); e != nil && err == nil {
+			err = e
+		}
 	}
-	return nil
+	return err
 }
 
 func (c *Client) roundTrip(ctx context.Context, req protocol.Request) (protocol.Response, error) {
-	conn, err := c.connection(ctx)
-	if err != nil {
-		return protocol.Response{}, err
+	if len(c.options.Nodes) == 0 {
+		return protocol.Response{}, ErrUnsupported
 	}
-	return conn.RoundTrip(ctx, req)
+	nodes := c.health.Available(c.placement.Candidates(req.Key))
+	if len(nodes) == 0 {
+		return protocol.Response{}, remote.ErrUnavailable
+	}
+	var sawMiss bool
+	for _, node := range nodes {
+		conn, err := c.connection(ctx, node)
+		if err != nil {
+			if errors.Is(err, ErrUnsupported) {
+				return protocol.Response{}, err
+			}
+			c.health.MarkFailure(node)
+			continue
+		}
+		resp, err := conn.RoundTrip(ctx, req)
+		if err != nil {
+			c.health.MarkFailure(node)
+			continue
+		}
+		switch resp.Status {
+		case protocol.StatusOK:
+			c.health.MarkSuccess(node)
+			return resp, nil
+		case protocol.StatusMiss:
+			c.health.MarkSuccess(node)
+			if req.Op == protocol.OpGet {
+				sawMiss = true
+				continue
+			}
+			if req.Op == protocol.OpDelete {
+				return protocol.Response{Status: protocol.StatusOK}, nil
+			}
+		default:
+			c.health.MarkFailure(node)
+		}
+	}
+	if sawMiss {
+		return protocol.Response{Status: protocol.StatusMiss}, nil
+	}
+	return protocol.Response{}, remote.ErrUnavailable
 }
 
-func (c *Client) connection(ctx context.Context) (Conn, error) {
+func (c *Client) connection(ctx context.Context, node string) (Conn, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return nil, ErrUnsupported
 	}
-	if c.conn != nil {
-		return c.conn, nil
+	if conn := c.conns[node]; conn != nil {
+		return conn, nil
 	}
-	if len(c.options.Nodes) == 0 {
-		return nil, ErrUnsupported
-	}
-	conn, err := c.options.Dialer.Dial(ctx, c.options.Nodes[0], c.options)
+	conn, err := c.options.Dialer.Dial(ctx, node, c.options)
 	if err != nil {
 		return nil, err
 	}
-	c.conn = conn
+	c.conns[node] = conn
 	return conn, nil
 }

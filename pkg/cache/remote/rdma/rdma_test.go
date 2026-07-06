@@ -19,6 +19,7 @@ package rdma
 import (
 	"context"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -127,12 +128,62 @@ func TestClientRoundTripMiss(t *testing.T) {
 	require.NoError(t, client.Close())
 }
 
+func TestClientSkipsFailedNodeAndUsesHealthyReplica(t *testing.T) {
+	backend := mock.NewClient()
+	require.NoError(t, backend.Put(context.Background(), "k", []byte("value")))
+	badDials := &atomic.Int32{}
+	goodDials := &atomic.Int32{}
+	client := NewClient(Options{
+		Nodes:         []string{"bad", "good"},
+		Replicas:      2,
+		FailThreshold: 1,
+		NodeCooldown:  time.Minute,
+		Dialer: routingDialer{
+			servers: map[string]*Server{"good": NewServer(backend)},
+			dials: map[string]*atomic.Int32{
+				"bad":  badDials,
+				"good": goodDials,
+			},
+		},
+	})
+
+	r, err := client.Get(context.Background(), "k", 0, -1)
+	require.NoError(t, err)
+	data, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+	require.Equal(t, []byte("value"), data)
+
+	r, err = client.Get(context.Background(), "k", 0, -1)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+	require.Equal(t, int32(1), badDials.Load())
+	require.GreaterOrEqual(t, goodDials.Load(), int32(1))
+	require.NoError(t, client.Close())
+}
+
 type memoryDialer struct {
 	server *Server
 }
 
 func (d memoryDialer) Dial(ctx context.Context, node string, options Options) (Conn, error) {
 	return memoryConn{server: d.server}, nil
+}
+
+type routingDialer struct {
+	servers map[string]*Server
+	dials   map[string]*atomic.Int32
+}
+
+func (d routingDialer) Dial(ctx context.Context, node string, options Options) (Conn, error) {
+	if counter := d.dials[node]; counter != nil {
+		counter.Add(1)
+	}
+	server := d.servers[node]
+	if server == nil {
+		return nil, remote.ErrUnavailable
+	}
+	return memoryConn{server: server}, nil
 }
 
 type memoryConn struct {
