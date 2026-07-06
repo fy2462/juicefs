@@ -120,6 +120,45 @@ wait_for_http() {
   fail "timed out waiting for http endpoint: $host:$port"
 }
 
+wait_for_http_down() {
+  host="$1"
+  port="$2"
+  need_cmd curl || fail "curl is required to wait for rustfs"
+  i=0
+  while [ "$i" -lt 100 ]; do
+    if ! curl -sS --connect-timeout 1 "http://$host:$port/" >/dev/null 2>&1; then
+      return
+    fi
+    i=$((i + 1))
+    sleep 0.1
+  done
+  fail "timed out waiting for http endpoint to stop: $host:$port"
+}
+
+wait_for_remote_cache_entries() {
+  dir="$1"
+  min_entries="$2"
+  i=0
+  while [ "$i" -lt 100 ]; do
+    entries="$(find "$dir" -name '*.data' -type f 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "$entries" -ge "$min_entries" ]; then
+      return
+    fi
+    i=$((i + 1))
+    sleep 0.1
+  done
+  fail "timed out waiting for $min_entries remote cache entries in $dir"
+}
+
+unmount_jfs() {
+  mountpoint="$1"
+  mount_pid="${2:-}"
+  "$ROOT_DIR/juicefs" umount "$mountpoint" >/dev/null 2>&1 || umount "$mountpoint" >/dev/null 2>&1 || true
+  if [ -n "$mount_pid" ]; then
+    wait "$mount_pid" 2>/dev/null || true
+  fi
+}
+
 start_rustfs() {
   data_dir="$TMP_DIR/rustfs-data"
   log="$TMP_DIR/rustfs.log"
@@ -168,6 +207,8 @@ start_remote_cache_server() {
   remote_dir="$TMP_DIR/l2-cache"
   remote_log="$TMP_DIR/rdma-cache-server.log"
   mkdir -p "$remote_dir"
+  REMOTE_CACHE_DIR="$remote_dir"
+  export REMOTE_CACHE_DIR
   "$ROOT_DIR/juicefs" rdma-cache-server \
     --listen 127.0.0.1:9568 \
     --transport http \
@@ -227,8 +268,9 @@ run_three_tier_read_path() {
   meta="$TMP_DIR/three-tier-meta.db"
   mountpoint="$TMP_DIR/three-tier-mnt"
   l1a="$TMP_DIR/l1-client-a"
+  l1fill="$TMP_DIR/l1-client-fill"
   l1b="$TMP_DIR/l1-client-b"
-  mkdir -p "$mountpoint" "$l1a" "$l1b"
+  mkdir -p "$mountpoint" "$l1a" "$l1fill" "$l1b"
 
   "$ROOT_DIR/juicefs" format \
     --storage s3 \
@@ -251,9 +293,25 @@ run_three_tier_read_path() {
   wait_for_mount "$mountpoint"
   dd if=/dev/zero bs=1048576 count=1 2>/dev/null | tr '\000' 'A' > "$mountpoint/blob.bin"
   sync
+  unmount_jfs "$mountpoint" "$mount_pid"
+
+  "$ROOT_DIR/juicefs" mount \
+    --cache-dir "$l1fill" \
+    --cache-size 64 \
+    --remote-cache rdma \
+    --remote-cache-transport http \
+    --remote-cache-nodes 127.0.0.1:9568 \
+    --remote-cache-fill-local=true \
+    --remote-cache-fill-remote=true \
+    "sqlite3://$meta" "$mountpoint" &
+  mount_pid=$!
+  wait_for_mount "$mountpoint"
   cat "$mountpoint/blob.bin" >/dev/null
-  "$ROOT_DIR/juicefs" umount "$mountpoint"
-  wait "$mount_pid" 2>/dev/null || true
+  unmount_jfs "$mountpoint" "$mount_pid"
+  wait_for_remote_cache_entries "$REMOTE_CACHE_DIR" 1
+
+  stop_rustfs
+  wait_for_http_down 127.0.0.1 9000
 
   "$ROOT_DIR/juicefs" mount \
     --cache-dir "$l1b" \
@@ -267,10 +325,15 @@ run_three_tier_read_path() {
   mount_pid=$!
   wait_for_mount "$mountpoint"
   wait_for_path "$mountpoint/blob.bin"
-  size="$(wc -c < "$mountpoint/blob.bin" | tr -d ' ')"
+  if ! cat "$mountpoint/blob.bin" > "$TMP_DIR/l2-blob.bin"; then
+    unmount_jfs "$mountpoint" "$mount_pid"
+    fail "fresh L1 read failed after rustfs stopped"
+  fi
+  size="$(wc -c < "$TMP_DIR/l2-blob.bin" | tr -d ' ')"
   [ "$size" = "1048576" ] || fail "unexpected blob size from three-tier read: $size"
-  "$ROOT_DIR/juicefs" umount "$mountpoint"
-  wait "$mount_pid" 2>/dev/null || true
+  non_a_bytes="$(tr -d 'A' < "$TMP_DIR/l2-blob.bin" | wc -c | tr -d ' ')"
+  [ "$non_a_bytes" = "0" ] || fail "unexpected blob content from three-tier read"
+  unmount_jfs "$mountpoint" "$mount_pid"
 }
 
 main() {
@@ -291,7 +354,7 @@ main() {
   wait_for_http 127.0.0.1 9568
   pass "remote cache server starts"
   run_three_tier_read_path
-  pass "three-tier read path returns data with fresh L1"
+  pass "three-tier read path returns data with fresh L1 after rustfs stops"
   echo "passed $TESTS_RUN tests"
 }
 
