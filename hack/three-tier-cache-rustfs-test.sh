@@ -45,11 +45,30 @@ EOF
   export RUSTFS_BIN
 }
 
+assert_file() {
+  path="$1"
+  [ -f "$path" ] || fail "missing file: $path"
+}
+
+assert_dir() {
+  path="$1"
+  [ -d "$path" ] || fail "missing directory: $path"
+}
+
+ensure_juicefs() {
+  if [ -x "$ROOT_DIR/juicefs" ]; then
+    return
+  fi
+  (cd "$ROOT_DIR" && make juicefs)
+}
+
 main() {
   rm -rf "$TMP_DIR"
   mkdir -p "$TMP_DIR"
   require_rustfs
-  pass "rustfs prerequisite is available"
+  ensure_juicefs
+  assert_file "$ROOT_DIR/juicefs"
+  pass "juicefs binary is available"
   echo "passed $TESTS_RUN tests"
 }
 
