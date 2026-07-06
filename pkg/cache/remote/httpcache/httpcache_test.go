@@ -126,3 +126,52 @@ func TestClientPutReplicatesToConfiguredReplicas(t *testing.T) {
 	require.NoError(t, client.Put(context.Background(), "k", []byte("value")))
 	require.Equal(t, int32(2), puts.Load())
 }
+
+func TestClientSkipsFailedSingleNodeDuringCooldown(t *testing.T) {
+	var gets atomic.Int32
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gets.Add(1)
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer failing.Close()
+
+	client := NewClientWithOptions(Options{
+		Nodes:         []string{failing.URL},
+		Timeout:       time.Second,
+		Replicas:      1,
+		FailThreshold: 1,
+		NodeCooldown:  time.Minute,
+	})
+
+	_, err := client.Get(context.Background(), "k", 0, -1)
+	require.ErrorIs(t, err, remote.ErrUnavailable)
+	_, err = client.Get(context.Background(), "k", 0, -1)
+	require.ErrorIs(t, err, remote.ErrUnavailable)
+	require.Equal(t, int32(1), gets.Load())
+}
+
+func TestClientReplicaFallbackMarksFailedNodeAndUsesHealthyReplica(t *testing.T) {
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer failing.Close()
+	backend := mock.NewClient()
+	require.NoError(t, backend.Put(context.Background(), "k", []byte("value")))
+	healthy := httptest.NewServer(NewHandler(backend))
+	defer healthy.Close()
+
+	client := NewClientWithOptions(Options{
+		Nodes:         []string{failing.URL, healthy.URL},
+		Timeout:       time.Second,
+		Replicas:      2,
+		FailThreshold: 1,
+		NodeCooldown:  time.Minute,
+	})
+
+	r, err := client.Get(context.Background(), "k", 0, -1)
+	require.NoError(t, err)
+	data, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+	require.Equal(t, []byte("value"), data)
+}

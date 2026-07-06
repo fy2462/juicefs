@@ -20,28 +20,31 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/juicedata/juicefs/pkg/cache/remote"
+	"github.com/juicedata/juicefs/pkg/cache/remote/cluster"
 )
 
 type Client struct {
-	nodes      []string
-	replicas   int
+	nodes     []string
+	placement *cluster.Placement
+	health    *cluster.Health
+
 	httpClient *http.Client
 }
 
 type Options struct {
-	Nodes    []string
-	Timeout  time.Duration
-	Replicas int
+	Nodes         []string
+	Timeout       time.Duration
+	Replicas      int
+	FailThreshold int
+	NodeCooldown  time.Duration
 }
 
 func NewClient(nodes []string, timeout time.Duration) remote.Client {
@@ -49,7 +52,7 @@ func NewClient(nodes []string, timeout time.Duration) remote.Client {
 }
 
 func NewClientWithOptions(options Options) remote.Client {
-	c := &Client{httpClient: &http.Client{Timeout: options.Timeout}}
+	var nodes []string
 	for _, node := range options.Nodes {
 		node = strings.TrimSpace(node)
 		if node == "" {
@@ -58,16 +61,14 @@ func NewClientWithOptions(options Options) remote.Client {
 		if !strings.Contains(node, "://") {
 			node = "http://" + node
 		}
-		c.nodes = append(c.nodes, strings.TrimRight(node, "/"))
+		nodes = append(nodes, strings.TrimRight(node, "/"))
 	}
-	c.replicas = options.Replicas
-	if c.replicas <= 0 {
-		c.replicas = 1
+	return &Client{
+		nodes:      nodes,
+		placement:  cluster.NewPlacement(nodes, options.Replicas),
+		health:     cluster.NewHealth(cluster.Options{FailThreshold: options.FailThreshold, Cooldown: options.NodeCooldown}),
+		httpClient: &http.Client{Timeout: options.Timeout},
 	}
-	if c.replicas > len(c.nodes) {
-		c.replicas = len(c.nodes)
-	}
-	return c
 }
 
 func (c *Client) Get(ctx context.Context, key string, off, size int) (io.ReadCloser, error) {
@@ -79,6 +80,7 @@ func (c *Client) Get(ctx context.Context, key string, off, size int) (io.ReadClo
 	for _, base := range nodes {
 		u, err := url.Parse(base + "/cache/" + url.PathEscape(key))
 		if err != nil {
+			c.health.MarkFailure(base)
 			continue
 		}
 		q := u.Query()
@@ -88,21 +90,26 @@ func (c *Client) Get(ctx context.Context, key string, off, size int) (io.ReadClo
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 		if err != nil {
+			c.health.MarkFailure(base)
 			continue
 		}
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
+			c.health.MarkFailure(base)
 			continue
 		}
 		if resp.StatusCode == http.StatusNotFound {
 			resp.Body.Close()
+			c.health.MarkSuccess(base)
 			sawMiss = true
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
+			c.health.MarkFailure(base)
 			continue
 		}
+		c.health.MarkSuccess(base)
 		return resp.Body, nil
 	}
 	if sawMiss {
@@ -120,15 +127,20 @@ func (c *Client) Put(ctx context.Context, key string, data []byte) error {
 	for _, base := range nodes {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut, base+"/cache/"+url.PathEscape(key), bytes.NewReader(data))
 		if err != nil {
+			c.health.MarkFailure(base)
 			continue
 		}
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
+			c.health.MarkFailure(base)
 			continue
 		}
 		_ = resp.Body.Close()
 		if resp.StatusCode == http.StatusNoContent {
+			c.health.MarkSuccess(base)
 			ok = true
+		} else {
+			c.health.MarkFailure(base)
 		}
 	}
 	if ok {
@@ -146,15 +158,20 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 	for _, base := range nodes {
 		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, base+"/cache/"+url.PathEscape(key), nil)
 		if err != nil {
+			c.health.MarkFailure(base)
 			continue
 		}
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
+			c.health.MarkFailure(base)
 			continue
 		}
 		_ = resp.Body.Close()
 		if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotFound {
+			c.health.MarkSuccess(base)
 			ok = true
+		} else {
+			c.health.MarkFailure(base)
 		}
 	}
 	if ok {
@@ -171,19 +188,11 @@ func (c *Client) replicaNodes(key string) ([]string, error) {
 	if len(c.nodes) == 0 {
 		return nil, remote.ErrDisabled
 	}
-	nodes := append([]string(nil), c.nodes...)
-	sort.Slice(nodes, func(i, j int) bool {
-		return rendezvousScore(key, nodes[i]) > rendezvousScore(key, nodes[j])
-	})
-	return nodes[:c.replicas], nil
-}
-
-func rendezvousScore(key, node string) uint64 {
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(key))
-	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(node))
-	return h.Sum64()
+	nodes := c.health.Available(c.placement.Candidates(key))
+	if len(nodes) == 0 {
+		return nil, remote.ErrUnavailable
+	}
+	return nodes, nil
 }
 
 func unavailablef(format string, args ...interface{}) error {
