@@ -20,12 +20,19 @@ package native
 
 /*
 #cgo LDFLAGS: -libverbs
+#include <stdint.h>
 #include <stdlib.h>
 #include <infiniband/verbs.h>
+
+static int jfs_ibv_query_port(struct ibv_context *context, uint8_t port_num, struct ibv_port_attr *port_attr) {
+	return ibv_query_port(context, port_num, port_attr);
+}
 */
 import "C"
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"unsafe"
@@ -39,13 +46,25 @@ const (
 type Resources struct {
 	deviceIndex       int
 	maxFrameBytes     int
+	portNum           uint8
+	psn               uint32
 	context           *C.struct_ibv_context
 	protectionDomain  *C.struct_ibv_pd
 	completionQueue   *C.struct_ibv_cq
+	queuePair         *C.struct_ibv_qp
 	memoryRegion      *C.struct_ibv_mr
 	bufferPtr         unsafe.Pointer
 	buffer            []byte
 	completionEntries int
+}
+
+type Endpoint struct {
+	LID   uint16
+	QPN   uint32
+	PSN   uint32
+	RKey  uint32
+	VAddr uint64
+	Port  uint8
 }
 
 func NewResources(deviceIndex, maxFrameBytes int) (*Resources, error) {
@@ -66,6 +85,7 @@ func NewResources(deviceIndex, maxFrameBytes int) (*Resources, error) {
 	resources := &Resources{
 		deviceIndex:       deviceIndex,
 		maxFrameBytes:     limit,
+		portNum:           1,
 		completionEntries: 32,
 	}
 	if err := resources.open(device); err != nil {
@@ -80,6 +100,12 @@ func (r *Resources) Close() error {
 		return nil
 	}
 	var err error
+	if r.queuePair != nil {
+		if rc := C.ibv_destroy_qp(r.queuePair); rc != 0 {
+			err = errors.Join(err, fmt.Errorf("destroy RDMA queue pair: %w", errnoError()))
+		}
+		r.queuePair = nil
+	}
 	if r.memoryRegion != nil {
 		if rc := C.ibv_dereg_mr(r.memoryRegion); rc != 0 {
 			err = errors.Join(err, fmt.Errorf("deregister RDMA memory region: %w", errnoError()))
@@ -110,6 +136,24 @@ func (r *Resources) Close() error {
 		r.context = nil
 	}
 	return err
+}
+
+func (r *Resources) LocalEndpoint() (Endpoint, error) {
+	if r == nil || r.queuePair == nil || r.memoryRegion == nil || r.bufferPtr == nil {
+		return Endpoint{}, ErrNoDevice
+	}
+	var portAttr C.struct_ibv_port_attr
+	if rc := C.jfs_ibv_query_port(r.context, C.uint8_t(r.portNum), &portAttr); rc != 0 {
+		return Endpoint{}, fmt.Errorf("query RDMA port %d: %w", r.portNum, errnoError())
+	}
+	return Endpoint{
+		LID:   uint16(portAttr.lid),
+		QPN:   uint32(r.queuePair.qp_num),
+		PSN:   r.psn,
+		RKey:  uint32(r.memoryRegion.rkey),
+		VAddr: uint64(uintptr(r.bufferPtr)),
+		Port:  r.portNum,
+	}, nil
 }
 
 func DeviceCount() (int, error) {
@@ -144,6 +188,30 @@ func (r *Resources) open(device *C.struct_ibv_device) error {
 	if r.memoryRegion == nil {
 		return fmt.Errorf("register RDMA memory region: %w", errnoError())
 	}
+	psn, err := randomPSN()
+	if err != nil {
+		return err
+	}
+	r.psn = psn
+	if err := r.createQueuePair(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *Resources) createQueuePair() error {
+	var initAttr C.struct_ibv_qp_init_attr
+	initAttr.send_cq = r.completionQueue
+	initAttr.recv_cq = r.completionQueue
+	initAttr.qp_type = C.IBV_QPT_RC
+	initAttr.cap.max_send_wr = 16
+	initAttr.cap.max_recv_wr = 16
+	initAttr.cap.max_send_sge = 1
+	initAttr.cap.max_recv_sge = 1
+	r.queuePair = C.ibv_create_qp(r.protectionDomain, &initAttr)
+	if r.queuePair == nil {
+		return fmt.Errorf("create RDMA queue pair: %w", errnoError())
+	}
 	return nil
 }
 
@@ -158,6 +226,14 @@ func getDeviceList() (**C.struct_ibv_device, int, error) {
 
 func errnoError() error {
 	return errors.New("libibverbs returned an error")
+}
+
+func randomPSN() (uint32, error) {
+	var data [4]byte
+	if _, err := rand.Read(data[:]); err != nil {
+		return 0, fmt.Errorf("generate RDMA packet sequence number: %w", err)
+	}
+	return binary.BigEndian.Uint32(data[:]) & 0xffffff, nil
 }
 
 func frameLimit(value int) int {

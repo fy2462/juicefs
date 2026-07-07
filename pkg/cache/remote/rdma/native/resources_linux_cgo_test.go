@@ -63,3 +63,23 @@ func TestNewResourcesAllocatesVerbsObjectsWhenDeviceExists(t *testing.T) {
 	require.NoError(t, resources.Close())
 	require.NoError(t, resources.Close())
 }
+
+func TestNewResourcesCreatesQueuePairAndEndpointWhenDeviceExists(t *testing.T) {
+	count, err := DeviceCount()
+	require.NoError(t, err)
+	if count == 0 {
+		t.Skip("no RDMA devices available")
+	}
+
+	resources, err := NewResources(0, 128<<10)
+	require.NoError(t, err)
+	defer resources.Close()
+
+	require.NotNil(t, resources.queuePair)
+	endpoint, err := resources.LocalEndpoint()
+	require.NoError(t, err)
+	require.NotZero(t, endpoint.QPN)
+	require.NotZero(t, endpoint.PSN)
+	require.NotZero(t, endpoint.RKey)
+	require.NotZero(t, endpoint.VAddr)
+}
