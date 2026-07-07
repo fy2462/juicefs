@@ -96,7 +96,7 @@ func TestServeNativeConnRunsEndpointHandshakeWhenResourcesExist(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		serveNativeConnWithResourceFactory(context.Background(), serverConn, NewServer(mock.NewClient()), defaultRDMAFrameBytes, fakeNativeResourceFactory{resource: serverResource}, false)
+		serveNativeConnWithResourceFactory(context.Background(), serverConn, NewServer(mock.NewClient()), defaultRDMAFrameBytes, fakeNativeResourceFactory{resource: serverResource}, false, 0)
 	}()
 
 	require.NoError(t, clientNativeHandshake(context.Background(), clientConn, clientResource))
@@ -115,7 +115,7 @@ func TestServeNativeConnUsesResourceFrameExchange(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		serveNativeConnWithResourceFactory(context.Background(), serverConn, NewServer(mock.NewClient()), defaultRDMAFrameBytes, fakeNativeResourceFactory{resource: serverResource}, false)
+		serveNativeConnWithResourceFactory(context.Background(), serverConn, NewServer(mock.NewClient()), defaultRDMAFrameBytes, fakeNativeResourceFactory{resource: serverResource}, false, 0)
 	}()
 
 	require.NoError(t, clientNativeHandshake(context.Background(), clientConn, clientResource))
@@ -141,7 +141,7 @@ func TestServeNativeConnHandlesMultipleResourceFrames(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		serveNativeConnWithResourceFactory(context.Background(), serverConn, NewServer(mock.NewClient()), defaultRDMAFrameBytes, fakeNativeResourceFactory{resource: serverResource}, false)
+		serveNativeConnWithResourceFactory(context.Background(), serverConn, NewServer(mock.NewClient()), defaultRDMAFrameBytes, fakeNativeResourceFactory{resource: serverResource}, false, 0)
 	}()
 
 	require.NoError(t, clientNativeHandshake(context.Background(), clientConn, clientResource))
@@ -160,7 +160,7 @@ func TestServeNativeConnRequiresDeviceWhenConfigured(t *testing.T) {
 		defer close(done)
 		serveNativeConnWithResourceFactory(context.Background(), serverConn, NewServer(mock.NewClient()), defaultRDMAFrameBytes, fakeNativeResourceFactory{
 			err: native.ErrNoDevice,
-		}, true)
+		}, true, 0)
 	}()
 
 	payload, err := protocol.EncodeRequest(protocol.Request{Op: protocol.OpPing})
@@ -169,6 +169,23 @@ func TestServeNativeConnRequiresDeviceWhenConfigured(t *testing.T) {
 	require.NoError(t, err)
 	require.Error(t, writeAll(clientConn, frame))
 	<-done
+}
+
+func TestServeNativeConnUsesConfiguredDeviceIndex(t *testing.T) {
+	serverResource := newFakeNativeResource(2)
+	clientResource := newFakeNativeResource(1)
+	factory := &recordingNativeResourceFactory{resource: serverResource}
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		serveNativeConnWithResourceFactory(context.Background(), serverConn, NewServer(mock.NewClient()), defaultRDMAFrameBytes, factory, false, 7)
+	}()
+
+	require.NoError(t, clientNativeHandshake(context.Background(), clientConn, clientResource))
+	<-done
+	require.Equal(t, int32(7), factory.deviceIndex.Load())
 }
 
 func TestNativeConnRoundTripUsesResourceFrameExchange(t *testing.T) {
@@ -282,6 +299,16 @@ type fakeNativeResourceFactory struct {
 
 func (f fakeNativeResourceFactory) New(deviceIndex, maxFrameBytes int) (nativeResource, error) {
 	return f.resource, f.err
+}
+
+type recordingNativeResourceFactory struct {
+	resource    nativeResource
+	deviceIndex atomic.Int32
+}
+
+func (f *recordingNativeResourceFactory) New(deviceIndex, maxFrameBytes int) (nativeResource, error) {
+	f.deviceIndex.Store(int32(deviceIndex))
+	return f.resource, nil
 }
 
 func readPayloadFromEncodedFrame(frame []byte) ([]byte, error) {

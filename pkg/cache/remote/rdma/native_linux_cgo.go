@@ -123,7 +123,7 @@ func ListenAndServe(ctx context.Context, options ServeOptions) error {
 			}
 			return err
 		}
-		go serveNativeConnWithResourceFactory(ctx, conn, server, maxFrame, nativeOptions.resourceFactory, nativeOptions.requireDevice)
+		go serveNativeConnWithResourceFactory(ctx, conn, server, maxFrame, nativeOptions.resourceFactory, nativeOptions.requireDevice, nativeOptions.deviceIndex)
 	}
 }
 
@@ -366,12 +366,12 @@ func writeHandshakeFrame(ctx context.Context, conn net.Conn, payload []byte) err
 }
 
 func serveNativeConn(ctx context.Context, conn net.Conn, server *Server, maxFrameBytes int) {
-	serveNativeConnWithResourceFactory(ctx, conn, server, maxFrameBytes, ibverbsResourceFactory{}, false)
+	serveNativeConnWithResourceFactory(ctx, conn, server, maxFrameBytes, ibverbsResourceFactory{}, false, 0)
 }
 
-func serveNativeConnWithResourceFactory(ctx context.Context, conn net.Conn, server *Server, maxFrameBytes int, resourceFactory nativeResourceFactory, requireDevice bool) {
+func serveNativeConnWithResourceFactory(ctx context.Context, conn net.Conn, server *Server, maxFrameBytes int, resourceFactory nativeResourceFactory, requireDevice bool, deviceIndex int) {
 	defer conn.Close()
-	resources, err := resourceFactory.New(0, maxFrameBytes)
+	resources, err := resourceFactory.New(deviceIndex, maxFrameBytes)
 	if err == nil {
 		defer resources.Close()
 		if err := serverNativeHandshake(ctx, conn, resources); err != nil {
