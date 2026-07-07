@@ -17,6 +17,7 @@ on:
       - 'hack/rdma-cache-workflow-test.sh'
       - 'hack/rdma-*-smoke-test.sh'
       - 'hack/rdma-native-smoke-test-test.sh'
+      - 'hack/rdma-native-mounted-smoke-test-test.sh'
       - 'hack/three-tier-cache-rustfs-test.sh'
       - 'hack/three-tier-cache-rustfs-test-test.sh'
       - 'pkg/cache/remote/**'
@@ -37,6 +38,7 @@ on:
       - 'hack/rdma-cache-workflow-test.sh'
       - 'hack/rdma-*-smoke-test.sh'
       - 'hack/rdma-native-smoke-test-test.sh'
+      - 'hack/rdma-native-mounted-smoke-test-test.sh'
       - 'hack/three-tier-cache-rustfs-test.sh'
       - 'hack/three-tier-cache-rustfs-test-test.sh'
       - 'pkg/cache/remote/**'
@@ -76,6 +78,7 @@ jobs:
           ./hack/rdma-cache-stress-test.sh
           ./hack/three-tier-cache-rustfs-test-test.sh
           ./hack/rdma-native-smoke-test-test.sh
+          ./hack/rdma-native-mounted-smoke-test-test.sh
           go test ./pkg/cache/remote/rdma/...
           go test ./cmd -run 'TestRDMACacheServer'
 

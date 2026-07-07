@@ -136,6 +136,10 @@ test.rdma-native-mock:
 	@test -n "$${OPEN_RDMA_DRIVER:-}" || (echo "OPEN_RDMA_DRIVER is required for test.rdma-native-mock" >&2; exit 2)
 	./hack/rdma-native-smoke-test.sh --mock-rdma "$${OPEN_RDMA_DRIVER}"
 
+test.rdma-native-mounted-mock:
+	@test -n "$${OPEN_RDMA_DRIVER:-}" || (echo "OPEN_RDMA_DRIVER is required for test.rdma-native-mounted-mock" >&2; exit 2)
+	./hack/rdma-native-mounted-smoke-test.sh --mock-rdma "$${OPEN_RDMA_DRIVER}"
+
 test.rdma-native-stress:
 	JFS_RDMA_SMOKE_OPS=$${JFS_RDMA_STRESS_OPS:-500} JFS_RDMA_SMOKE_CONCURRENCY=$${JFS_RDMA_STRESS_CONCURRENCY:-8} ./hack/rdma-native-smoke-test.sh
 

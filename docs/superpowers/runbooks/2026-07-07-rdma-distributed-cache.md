@@ -186,6 +186,14 @@ OPEN_RDMA_DRIVER=/media/psf/Home/github/PFS/open-rdma-driver \
 make test.rdma-native-mock
 ```
 
+Run the mounted three-tier path with Redis metadata, RustFS S3 L3, local L1,
+and native RDMA L2 through open-rdma mock mode:
+
+```sh
+OPEN_RDMA_DRIVER=/media/psf/Home/github/PFS/open-rdma-driver \
+make test.rdma-native-mounted-mock
+```
+
 Run the same mock-backed path through the stress harness entrypoint:
 
 ```sh
