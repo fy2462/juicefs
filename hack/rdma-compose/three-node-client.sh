@@ -8,6 +8,7 @@ SECRET_KEY="rustfsadmin"
 ROOT="/tmp/jfs-compose-three-node"
 MNT="$ROOT/mnt"
 PAYLOAD="docker-compose-three-node"
+SECOND_PAYLOAD="docker-compose-three-node-second"
 METRICS_PORT="${METRICS_PORT:-}"
 
 fail() {
@@ -104,6 +105,14 @@ assert_metric_gt() {
     fail "$message: before=$before after=$after"
 }
 
+assert_metric_eq() {
+  actual="$1"
+  expected="$2"
+  message="$3"
+  awk -v actual="$actual" -v expected="$expected" 'BEGIN { exit !(actual == expected) }' ||
+    fail "$message: expected=$expected actual=$actual"
+}
+
 wait_for_l2_entries() {
   dir="$1"
   i=0
@@ -193,11 +202,13 @@ prepare() {
 
   mount_without_remote_cache "$ROOT/l1-writer"
   printf '%s\n' "$PAYLOAD" > "$MNT/payload.txt"
+  printf '%s\n' "$SECOND_PAYLOAD" > "$MNT/payload2.txt"
   sync
   unmount_jfs "$MNT" "$MOUNT_PID"
 
   mount_with_remote_cache "$ROOT/l1-warm-survivor" "l2-node-2:9568" 1
   grep -F "$PAYLOAD" "$MNT/payload.txt" >/dev/null
+  grep -F "$SECOND_PAYLOAD" "$MNT/payload2.txt" >/dev/null
   wait_for_l2_entries /l2-node-2-cache
   unmount_jfs "$MNT" "$MOUNT_PID"
   echo "ok - docker compose three-node prepared L3 and surviving L2"
@@ -208,11 +219,31 @@ read_surviving_l2() {
   mount_with_remote_cache "$ROOT/l1-read-surviving-l2" "l2-node-1:9568,l2-node-2:9568" 2
   hit_before="$(metric_value "$METRICS_PORT" "juicefs_remote_cache_gets_total" 'result="hit"')"
   grep -F "$PAYLOAD" "$MNT/payload.txt" >/dev/null
+  grep -F "$SECOND_PAYLOAD" "$MNT/payload2.txt" >/dev/null
   hit_after="$(metric_value "$METRICS_PORT" "juicefs_remote_cache_gets_total" 'result="hit"')"
   assert_metric_gt "$hit_after" "$hit_before" "remote cache hit metric did not increase for surviving L2 read"
   unmount_jfs "$MNT" "$MOUNT_PID"
   METRICS_PORT=
   echo "ok - docker compose three-node read survives one L2 node and L3 outage"
+}
+
+read_node_health_fallback() {
+  wait_for_http rustfs 9000
+  METRICS_PORT=9573
+  mount_with_remote_cache "$ROOT/l1-read-node-health-fallback" "l2-node-1:9568" 1
+  fallback_before="$(metric_value "$METRICS_PORT" "juicefs_remote_cache_fallbacks_total")"
+  skip_before="$(metric_value "$METRICS_PORT" "juicefs_remote_cache_node_skips_total" 'node="http://l2-node-1:9568"')"
+  grep -F "$PAYLOAD" "$MNT/payload.txt" >/dev/null
+  node1_down="$(metric_value "$METRICS_PORT" "juicefs_remote_cache_node_down" 'node="http://l2-node-1:9568"')"
+  assert_metric_eq "$node1_down" "1" "remote cache node_down metric did not mark stopped L2 node down"
+  grep -F "$SECOND_PAYLOAD" "$MNT/payload2.txt" >/dev/null
+  fallback_after="$(metric_value "$METRICS_PORT" "juicefs_remote_cache_fallbacks_total")"
+  skip_after="$(metric_value "$METRICS_PORT" "juicefs_remote_cache_node_skips_total" 'node="http://l2-node-1:9568"')"
+  assert_metric_gt "$fallback_after" "$fallback_before" "remote cache fallback metric did not increase for stopped L2 read"
+  assert_metric_gt "$skip_after" "$skip_before" "remote cache skip metric did not increase for stopped L2 node"
+  unmount_jfs "$MNT" "$MOUNT_PID"
+  METRICS_PORT=
+  echo "ok - docker compose three-node marks stopped L2 down and skips it"
 }
 
 read_l3_fallback() {
@@ -245,6 +276,9 @@ case "${1:-}" in
   read-surviving-l2)
     read_surviving_l2
     ;;
+  read-node-health-fallback)
+    read_node_health_fallback
+    ;;
   read-l3-fallback)
     read_l3_fallback
     ;;
@@ -252,7 +286,7 @@ case "${1:-}" in
     read_l2_l3_down_fails
     ;;
   *)
-    echo "usage: $0 prepare|read-surviving-l2|read-l3-fallback|read-l2-l3-down-fails" >&2
+    echo "usage: $0 prepare|read-node-health-fallback|read-surviving-l2|read-l3-fallback|read-l2-l3-down-fails" >&2
     exit 2
     ;;
 esac

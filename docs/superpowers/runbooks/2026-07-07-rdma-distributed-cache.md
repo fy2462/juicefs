@@ -206,9 +206,12 @@ container-level node identity, one-L2-node failure, all-L2-down L1+L3 fallback,
 and L2+L3-down failure. It also asserts that
 `juicefs_remote_cache_gets_total{result="hit"}` increases during the surviving
 L2 read and that `juicefs_remote_cache_fallbacks_total` increases during the
-all-L2-down L3 read. The native RDMA data path remains covered by the open-rdma
-mock mounted smoke targets because the mock verbs provider depends on host RDMA
-mock setup rather than ordinary Docker bridge networking.
+all-L2-down L3 read. The stopped-node stage also checks
+`juicefs_remote_cache_node_down` and `juicefs_remote_cache_node_skips_total` so
+the smoke proves the local health manager marks and skips the failed L2 node.
+The native RDMA data path remains covered by the open-rdma mock mounted smoke
+targets because the mock verbs provider depends on host RDMA mock setup rather
+than ordinary Docker bridge networking.
 
 Run mounted native RDMA L2 failover with two L2 nodes, single-node L2 failure,
 all-L2-down L1+L3 fallback, and L2+L3-down failure:

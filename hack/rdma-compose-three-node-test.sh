@@ -51,6 +51,7 @@ compose up -d redis rustfs l2-node-1 l2-node-2 client-node
 compose exec -T client-node /work/hack/rdma-compose/three-node-client.sh prepare
 
 compose stop l2-node-1
+compose exec -T client-node /work/hack/rdma-compose/three-node-client.sh read-node-health-fallback
 compose stop rustfs
 compose exec -T client-node /work/hack/rdma-compose/three-node-client.sh read-surviving-l2
 
