@@ -8,6 +8,7 @@ TESTS_RUN=0
 cleanup() {
   stop_remote_cache_servers
   stop_rustfs
+  stop_redis
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT INT TERM
@@ -58,6 +59,32 @@ EOF
   cat <<'EOF'
 SKIP: rustfs runtime is required for this smoke.
 Set RUSTFS_BIN=/path/to/rustfs, put rustfs in PATH, or install docker.
+EOF
+  exit 0
+}
+
+redis_bin() {
+  command -v redis-server 2>/dev/null || true
+}
+
+require_redis() {
+  bin="$(redis_bin)"
+  if [ -n "$bin" ] && [ -x "$bin" ]; then
+    need_cmd redis-cli || fail "redis-cli is required when using local redis-server"
+    REDIS_BIN="$bin"
+    REDIS_MODE="bin"
+    export REDIS_BIN REDIS_MODE
+    return
+  fi
+  if need_cmd docker; then
+    REDIS_MODE="docker"
+    REDIS_IMAGE="${REDIS_IMAGE:-redis:7-alpine}"
+    export REDIS_MODE REDIS_IMAGE
+    return
+  fi
+  cat <<'EOF'
+SKIP: redis runtime is required for this smoke.
+Install redis-server, put redis-server in PATH, or install docker.
 EOF
   exit 0
 }
@@ -223,6 +250,75 @@ stop_rustfs() {
   fi
 }
 
+start_redis() {
+  REDIS_ENDPOINT="${REDIS_ENDPOINT:-127.0.0.1:16379}"
+  REDIS_HOST="${REDIS_ENDPOINT%:*}"
+  REDIS_PORT="${REDIS_ENDPOINT##*:}"
+  redis_log="$TMP_DIR/redis.log"
+  case "${REDIS_MODE:-bin}" in
+    docker)
+      REDIS_CONTAINER="jfs-redis-$$"
+      docker run -d --rm \
+        --name "$REDIS_CONTAINER" \
+        -p "$REDIS_ENDPOINT:6379" \
+        "$REDIS_IMAGE" redis-server --save "" --appendonly no >"$redis_log"
+      export REDIS_CONTAINER
+      ;;
+    *)
+      "$REDIS_BIN" --bind "$REDIS_HOST" --port "$REDIS_PORT" --save "" --appendonly no --dir "$TMP_DIR" >"$redis_log" 2>&1 &
+      REDIS_PID=$!
+      export REDIS_PID
+      ;;
+  esac
+  export REDIS_ENDPOINT REDIS_HOST REDIS_PORT
+  wait_for_redis
+}
+
+stop_redis() {
+  if [ -n "${REDIS_CONTAINER:-}" ]; then
+    docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${REDIS_PID:-}" ]; then
+    kill "$REDIS_PID" 2>/dev/null || true
+    wait "$REDIS_PID" 2>/dev/null || true
+  fi
+}
+
+redis_cli() {
+  db="$1"
+  shift
+  case "${REDIS_MODE:-bin}" in
+    docker)
+      docker exec "$REDIS_CONTAINER" redis-cli -n "$db" "$@"
+      ;;
+    *)
+      redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$db" "$@"
+      ;;
+  esac
+}
+
+wait_for_redis() {
+  i=0
+  while [ "$i" -lt 100 ]; do
+    if redis_cli 0 PING >/dev/null 2>&1; then
+      return
+    fi
+    i=$((i + 1))
+    sleep 0.1
+  done
+  fail "timed out waiting for redis endpoint: $REDIS_ENDPOINT"
+}
+
+flush_redis_db() {
+  redis_cli "$1" FLUSHDB >/dev/null
+}
+
+meta_url() {
+  db="$1"
+  flush_redis_db "$db"
+  printf 'redis://%s/%s\n' "$REDIS_ENDPOINT" "$db"
+}
+
 start_remote_cache_server() {
   remote_dir="$TMP_DIR/l2-cache"
   remote_log="$TMP_DIR/rdma-cache-server.log"
@@ -266,7 +362,7 @@ stop_remote_cache_servers() {
 }
 
 run_s3_baseline() {
-  meta="$TMP_DIR/meta.db"
+  meta="$(meta_url 10)"
   mountpoint="$TMP_DIR/mnt"
   cache_dir="$TMP_DIR/l1-cache"
   bucket_url="$RUSTFS_BUCKET_URL"
@@ -278,12 +374,12 @@ run_s3_baseline() {
     --access-key "$RUSTFS_ACCESS_KEY" \
     --secret-key "$RUSTFS_SECRET_KEY" \
     --trash-days 0 \
-    "sqlite3://$meta" rustfs-jfs
+    "$meta" rustfs-jfs
 
   "$ROOT_DIR/juicefs" mount \
     --cache-dir "$cache_dir" \
     --cache-size 64 \
-    "sqlite3://$meta" "$mountpoint" &
+    "$meta" "$mountpoint" &
   mount_pid=$!
   wait_for_mount "$mountpoint"
 
@@ -295,7 +391,7 @@ run_s3_baseline() {
   "$ROOT_DIR/juicefs" mount \
     --cache-dir "$cache_dir" \
     --cache-size 64 \
-    "sqlite3://$meta" "$mountpoint" &
+    "$meta" "$mountpoint" &
   mount_pid=$!
   wait_for_mount "$mountpoint"
   wait_for_path "$mountpoint/payload.txt"
@@ -305,7 +401,7 @@ run_s3_baseline() {
 }
 
 run_three_tier_read_path() {
-  meta="$TMP_DIR/three-tier-meta.db"
+  meta="$(meta_url 11)"
   mountpoint="$TMP_DIR/three-tier-mnt"
   l1a="$TMP_DIR/l1-client-a"
   l1fill="$TMP_DIR/l1-client-fill"
@@ -318,7 +414,7 @@ run_three_tier_read_path() {
     --access-key "$RUSTFS_ACCESS_KEY" \
     --secret-key "$RUSTFS_SECRET_KEY" \
     --trash-days 0 \
-    "sqlite3://$meta" three-tier-jfs
+    "$meta" three-tier-jfs
 
   "$ROOT_DIR/juicefs" mount \
     --cache-dir "$l1a" \
@@ -326,9 +422,10 @@ run_three_tier_read_path() {
     --remote-cache rdma \
     --remote-cache-transport http \
     --remote-cache-nodes 127.0.0.1:9568 \
+    --remote-cache-timeout 2s \
     --remote-cache-fill-local=true \
     --remote-cache-fill-remote=true \
-    "sqlite3://$meta" "$mountpoint" &
+    "$meta" "$mountpoint" &
   mount_pid=$!
   wait_for_mount "$mountpoint"
   dd if=/dev/zero bs=1048576 count=1 2>/dev/null | tr '\000' 'A' > "$mountpoint/blob.bin"
@@ -341,9 +438,10 @@ run_three_tier_read_path() {
     --remote-cache rdma \
     --remote-cache-transport http \
     --remote-cache-nodes 127.0.0.1:9568 \
+    --remote-cache-timeout 2s \
     --remote-cache-fill-local=true \
     --remote-cache-fill-remote=true \
-    "sqlite3://$meta" "$mountpoint" &
+    "$meta" "$mountpoint" &
   mount_pid=$!
   wait_for_mount "$mountpoint"
   cat "$mountpoint/blob.bin" >/dev/null
@@ -359,9 +457,10 @@ run_three_tier_read_path() {
     --remote-cache rdma \
     --remote-cache-transport http \
     --remote-cache-nodes 127.0.0.1:9568 \
+    --remote-cache-timeout 2s \
     --remote-cache-fill-local=true \
     --remote-cache-fill-remote=true \
-    "sqlite3://$meta" "$mountpoint" &
+    "$meta" "$mountpoint" &
   mount_pid=$!
   wait_for_mount "$mountpoint"
   wait_for_path "$mountpoint/blob.bin"
@@ -377,7 +476,7 @@ run_three_tier_read_path() {
 }
 
 run_l2_down_fallback_path() {
-  meta="$TMP_DIR/l2-down-meta.db"
+  meta="$(meta_url 12)"
   mountpoint="$TMP_DIR/l2-down-mnt"
   l1a="$TMP_DIR/l2-down-l1-a"
   l1b="$TMP_DIR/l2-down-l1-b"
@@ -394,7 +493,7 @@ run_l2_down_fallback_path() {
     --access-key "$RUSTFS_ACCESS_KEY" \
     --secret-key "$RUSTFS_SECRET_KEY" \
     --trash-days 0 \
-    "sqlite3://$meta" l2-down-jfs
+    "$meta" l2-down-jfs
 
   "$ROOT_DIR/juicefs" mount \
     --cache-dir "$l1a" \
@@ -402,9 +501,10 @@ run_l2_down_fallback_path() {
     --remote-cache rdma \
     --remote-cache-transport http \
     --remote-cache-nodes 127.0.0.1:9568 \
+    --remote-cache-timeout 2s \
     --remote-cache-fill-local=true \
     --remote-cache-fill-remote=true \
-    "sqlite3://$meta" "$mountpoint" &
+    "$meta" "$mountpoint" &
   mount_pid=$!
   wait_for_mount "$mountpoint"
   printf 'l2-down-fallback\n' > "$mountpoint/payload.txt"
@@ -422,7 +522,7 @@ run_l2_down_fallback_path() {
     --remote-cache-timeout 25ms \
     --remote-cache-fill-local=true \
     --remote-cache-fill-remote=true \
-    "sqlite3://$meta" "$mountpoint" &
+    "$meta" "$mountpoint" &
   mount_pid=$!
   wait_for_mount "$mountpoint"
   wait_for_path "$mountpoint/payload.txt"
@@ -439,7 +539,7 @@ run_l2_down_fallback_path() {
     --remote-cache-transport http \
     --remote-cache-nodes 127.0.0.1:9568 \
     --remote-cache-timeout 25ms \
-    "sqlite3://$meta" "$mountpoint" &
+    "$meta" "$mountpoint" &
   mount_pid=$!
   wait_for_mount "$mountpoint"
   if grep -F 'l2-down-fallback' "$mountpoint/payload.txt" >/dev/null 2>&1; then
@@ -450,7 +550,7 @@ run_l2_down_fallback_path() {
 }
 
 run_multi_node_l2_recovery_path() {
-  meta="$TMP_DIR/multi-l2-meta.db"
+  meta="$(meta_url 13)"
   mountpoint="$TMP_DIR/multi-l2-mnt"
   l1a="$TMP_DIR/multi-l2-l1-a"
   l1fill="$TMP_DIR/multi-l2-l1-fill"
@@ -475,7 +575,7 @@ run_multi_node_l2_recovery_path() {
     --access-key "$RUSTFS_ACCESS_KEY" \
     --secret-key "$RUSTFS_SECRET_KEY" \
     --trash-days 0 \
-    "sqlite3://$meta" multi-l2-jfs
+    "$meta" multi-l2-jfs
 
   "$ROOT_DIR/juicefs" mount \
     --cache-dir "$l1a" \
@@ -484,9 +584,10 @@ run_multi_node_l2_recovery_path() {
     --remote-cache-transport http \
     --remote-cache-nodes 127.0.0.1:9568,127.0.0.1:9569 \
     --remote-cache-replicas 2 \
+    --remote-cache-timeout 2s \
     --remote-cache-fill-local=true \
     --remote-cache-fill-remote=true \
-    "sqlite3://$meta" "$mountpoint" &
+    "$meta" "$mountpoint" &
   mount_pid=$!
   wait_for_mount "$mountpoint"
   dd if=/dev/zero bs=1048576 count=1 2>/dev/null | tr '\000' 'B' > "$mountpoint/blob.bin"
@@ -500,9 +601,10 @@ run_multi_node_l2_recovery_path() {
     --remote-cache-transport http \
     --remote-cache-nodes 127.0.0.1:9568,127.0.0.1:9569 \
     --remote-cache-replicas 2 \
+    --remote-cache-timeout 2s \
     --remote-cache-fill-local=true \
     --remote-cache-fill-remote=true \
-    "sqlite3://$meta" "$mountpoint" &
+    "$meta" "$mountpoint" &
   mount_pid=$!
   wait_for_mount "$mountpoint"
   cat "$mountpoint/blob.bin" >/dev/null
@@ -522,10 +624,10 @@ run_multi_node_l2_recovery_path() {
     --remote-cache-transport http \
     --remote-cache-nodes 127.0.0.1:9568,127.0.0.1:9569 \
     --remote-cache-replicas 2 \
-    --remote-cache-timeout 25ms \
+    --remote-cache-timeout 2s \
     --remote-cache-fill-local=true \
     --remote-cache-fill-remote=true \
-    "sqlite3://$meta" "$mountpoint" &
+    "$meta" "$mountpoint" &
   mount_pid=$!
   wait_for_mount "$mountpoint"
   if ! cat "$mountpoint/blob.bin" > "$TMP_DIR/multi-l2-blob.bin"; then
@@ -551,9 +653,10 @@ run_multi_node_l2_recovery_path() {
     --remote-cache-transport http \
     --remote-cache-nodes 127.0.0.1:9568,127.0.0.1:9569 \
     --remote-cache-replicas 2 \
+    --remote-cache-timeout 2s \
     --remote-cache-fill-local=true \
     --remote-cache-fill-remote=true \
-    "sqlite3://$meta" "$mountpoint" &
+    "$meta" "$mountpoint" &
   mount_pid=$!
   wait_for_mount "$mountpoint"
   printf 'multi-node-recovery\n' > "$mountpoint/recovery.txt"
@@ -567,9 +670,10 @@ run_multi_node_l2_recovery_path() {
     --remote-cache-transport http \
     --remote-cache-nodes 127.0.0.1:9568,127.0.0.1:9569 \
     --remote-cache-replicas 2 \
+    --remote-cache-timeout 2s \
     --remote-cache-fill-local=true \
     --remote-cache-fill-remote=true \
-    "sqlite3://$meta" "$mountpoint" &
+    "$meta" "$mountpoint" &
   mount_pid=$!
   wait_for_mount "$mountpoint"
   grep -F 'multi-node-recovery' "$mountpoint/recovery.txt" >/dev/null
@@ -585,6 +689,7 @@ main() {
   rm -rf "$TMP_DIR"
   mkdir -p "$TMP_DIR"
   require_rustfs
+  require_redis
   ensure_juicefs
   assert_file "$ROOT_DIR/juicefs"
   pass "juicefs binary is available"
@@ -592,6 +697,7 @@ main() {
   RUSTFS_SECRET_KEY="${RUSTFS_SECRET_KEY:-rustfsadmin}"
   RUSTFS_BUCKET_URL="${RUSTFS_BUCKET_URL:-http://127.0.0.1:9000/jfs-three-tier}"
   export RUSTFS_ACCESS_KEY RUSTFS_SECRET_KEY RUSTFS_BUCKET_URL
+  start_redis
   start_rustfs
   run_s3_baseline
   pass "rustfs S3 baseline survives remount"

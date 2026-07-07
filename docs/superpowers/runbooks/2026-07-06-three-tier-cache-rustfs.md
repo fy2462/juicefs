@@ -10,6 +10,9 @@ L1 local disk cache -> L2 remote cache server -> L3 rustfs S3
 
 - Buildable JuiceFS checkout.
 - A `rustfs` binary in `PATH`, `RUSTFS_BIN=/path/to/rustfs`, or Docker access.
+- A `redis-server`/`redis-cli` pair in `PATH`, or Docker access. The smoke uses
+  Redis metadata and starts Docker Redis from `redis:7-alpine` when a local
+  Redis binary is not available.
 - Linux or macOS host that can run JuiceFS mount tests.
 
 ## Command
@@ -20,9 +23,13 @@ make test.three-tier-cache-rustfs
 
 ## Expected Result
 
-The smoke prints numbered `ok` lines and exits zero. If neither rustfs nor Docker
-is installed, the smoke prints a clear prerequisite message and exits zero
-without running the integration path.
+The smoke prints numbered `ok` lines and exits zero. If neither RustFS nor Docker
+is installed, or neither Redis nor Docker is installed, the smoke prints a clear
+prerequisite message and exits zero without running the integration path.
+
+Each scenario uses a fresh Redis logical database, for example
+`redis://127.0.0.1:16379/10`, so metadata state does not leak across the
+baseline, L2 fill, L2 failure, or multi-node recovery checks.
 
 The three-tier check proves L2 serving rather than only proving that data
 can be read:

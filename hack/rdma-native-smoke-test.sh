@@ -7,10 +7,11 @@ ADDR="${JFS_RDMA_SMOKE_ADDR:-127.0.0.1:19568}"
 TESTS_RUN=0
 SERVER_PID=""
 STRICT_DEVICE="${JFS_RDMA_REQUIRE_DEVICE:-false}"
+MOCK_RDMA_DIR=""
 
 usage() {
   cat <<'EOF'
-Usage: hack/rdma-native-smoke-test.sh [--strict-device]
+Usage: hack/rdma-native-smoke-test.sh [--strict-device] [--mock-rdma DIR]
 
 Runs the rdma-cache-server native transport smoke. By default the smoke can
 fall back to the framed TCP path when no RDMA device exists, which keeps normal
@@ -19,6 +20,8 @@ CI hardware-independent.
 Options:
   --strict-device   Require an ibverbs/open-rdma device and force payloads
                     through native RDMA resources with JFS_RDMA_REQUIRE_DEVICE.
+  --mock-rdma DIR   Use an open-rdma-driver checkout in mock mode as the RDMA
+                    provider and force the strict native data path.
 
 Environment:
   JFS_RDMA_SMOKE_OPS          Total put/get/delete iterations. Default: 1.
@@ -32,6 +35,13 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --strict-device)
       STRICT_DEVICE=true
+      shift
+      ;;
+    --mock-rdma)
+      [ "$#" -ge 2 ] || fail "--mock-rdma requires a driver directory"
+      MOCK_RDMA_DIR="$2"
+      STRICT_DEVICE=true
+      shift 2
       ;;
     --help|-h)
       usage
@@ -42,7 +52,6 @@ while [ "$#" -gt 0 ]; do
       exit 2
       ;;
   esac
-  shift
 done
 
 cleanup() {
@@ -94,6 +103,21 @@ require_native_build() {
     echo "SKIP: native RDMA smoke requires CGO_ENABLED=1"
     exit 0
   fi
+}
+
+enable_mock_rdma() {
+  [ -n "$MOCK_RDMA_DIR" ] || return 0
+  [ -d "$MOCK_RDMA_DIR" ] || fail "missing open-rdma checkout: $MOCK_RDMA_DIR"
+  "$ROOT_DIR/hack/open-rdma-smoke-test.sh" --driver-dir "$MOCK_RDMA_DIR" --strict
+  OPEN_RDMA_DRIVER="$MOCK_RDMA_DIR"
+  export OPEN_RDMA_DRIVER
+  if [ -f "$MOCK_RDMA_DIR/scripts/setup-env.sh" ]; then
+    # shellcheck disable=SC1090
+    . "$MOCK_RDMA_DIR/scripts/setup-env.sh"
+  fi
+  mock_libs="$MOCK_RDMA_DIR/dtld-ibverbs/target/debug:$MOCK_RDMA_DIR/dtld-ibverbs/rdma-core-55.0/build/lib"
+  LD_LIBRARY_PATH="$mock_libs:${LD_LIBRARY_PATH:-}"
+  export LD_LIBRARY_PATH
 }
 
 require_rdma_device_for_strict() {
@@ -343,6 +367,7 @@ run_client() {
 mkdir -p "$TMP_DIR"
 ensure_go_env
 require_native_build
+enable_mock_rdma
 require_rdma_device_for_strict
 write_client
 server_bin="$(build_server)"

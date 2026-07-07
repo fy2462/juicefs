@@ -18,5 +18,8 @@ assert_contains() {
 assert_contains "JFS_RDMA_SMOKE_REPORT"
 assert_contains "ops_per_second"
 assert_contains "duration_ms"
+assert_contains "--mock-rdma"
+assert_contains "OPEN_RDMA_DRIVER"
+assert_contains "LD_LIBRARY_PATH"
 
 echo "ok - rdma native smoke script documents performance report output"

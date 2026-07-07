@@ -9,8 +9,14 @@ on:
       - '.github/workflows/rdma-cache.yml'
       - 'Makefile'
       - 'cmd/rdma_cache_server*.go'
+      - 'docs/superpowers/runbooks/2026-07-07-rdma-distributed-cache.md'
+      - 'docs/superpowers/runbooks/rdma-cache-alerts.prometheus.yml'
+      - 'hack/rdma-cache-runbook-test.sh'
+      - 'hack/rdma-cache-workflow-test.sh'
       - 'hack/rdma-*-smoke-test.sh'
+      - 'hack/rdma-native-smoke-test-test.sh'
       - 'hack/three-tier-cache-rustfs-test.sh'
+      - 'hack/three-tier-cache-rustfs-test-test.sh'
       - 'pkg/cache/remote/**'
       - 'pkg/chunk/**'
   pull_request:
@@ -21,8 +27,14 @@ on:
       - '.github/workflows/rdma-cache.yml'
       - 'Makefile'
       - 'cmd/rdma_cache_server*.go'
+      - 'docs/superpowers/runbooks/2026-07-07-rdma-distributed-cache.md'
+      - 'docs/superpowers/runbooks/rdma-cache-alerts.prometheus.yml'
+      - 'hack/rdma-cache-runbook-test.sh'
+      - 'hack/rdma-cache-workflow-test.sh'
       - 'hack/rdma-*-smoke-test.sh'
+      - 'hack/rdma-native-smoke-test-test.sh'
       - 'hack/three-tier-cache-rustfs-test.sh'
+      - 'hack/three-tier-cache-rustfs-test-test.sh'
       - 'pkg/cache/remote/**'
       - 'pkg/chunk/**'
   workflow_dispatch:
@@ -57,6 +69,8 @@ jobs:
       - name: Test default RDMA compatibility
         run: |
           ./hack/rdma-cache-workflow-test.sh
+          ./hack/three-tier-cache-rustfs-test-test.sh
+          ./hack/rdma-native-smoke-test-test.sh
           go test ./pkg/cache/remote/rdma/...
           go test ./cmd -run 'TestRDMACacheServer'
 
@@ -82,7 +96,7 @@ jobs:
 
       - name: Install three-tier smoke dependencies
         run: |
-          sudo .github/scripts/apt_install.sh fuse3 sqlite3
+          sudo .github/scripts/apt_install.sh fuse3 redis-server
 
       - name: Run RustFS three-tier cache smoke
         run: |

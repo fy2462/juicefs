@@ -21,8 +21,10 @@ make juicefs
 
 ## RustFS L3
 
-The smoke can use a `rustfs` binary or Docker. With Docker available, no manual
-RustFS startup is required:
+The smoke can use a `rustfs` binary or Docker. It also uses Redis for JuiceFS
+metadata. If local Redis is not installed, Docker Redis is started from
+`redis:7-alpine`. With Docker available, no manual RustFS or Redis startup is
+required:
 
 ```sh
 make test.three-tier-cache-rustfs
@@ -48,7 +50,7 @@ juicefs mount \
   --remote-cache-node-cooldown 5s \
   --remote-cache-probe-interval 1s \
   --remote-cache-probe-timeout 10ms \
-  sqlite3:///tmp/jfs-meta.db /mnt/jfs
+  redis://127.0.0.1:6379/1 /mnt/jfs
 ```
 
 The important failure behavior is:
@@ -102,7 +104,7 @@ go build -tags rdma -o juicefs-rdma .
   --remote-cache-node-cooldown 5s \
   --remote-cache-probe-interval 1s \
   --remote-cache-probe-timeout 10ms \
-  sqlite3:///tmp/jfs-meta.db /mnt/jfs
+  redis://127.0.0.1:6379/2 /mnt/jfs
 ```
 
 Native transport build-time and runtime knobs:
@@ -158,6 +160,11 @@ with an ibverbs/open-rdma device, this proves payloads travel through verbs
 instead of TCP fallback. On a host without such a device, it prints a clear SKIP
 before starting the server.
 
+In an environment without an RDMA device, semantic cache tests skip the native
+L2 RDMA data path and validate L1+L3 behavior plus HTTP-backed L2 ordering and
+fallback. Use strict native RDMA tests only on real RDMA hosts or with
+open-rdma mock mode.
+
 ## Native Smoke And Stress
 
 Run the direct native transport smoke:
@@ -170,6 +177,12 @@ Run strict native transport smoke on an open-rdma or real RDMA host:
 
 ```sh
 make test.rdma-native-strict
+```
+
+Run strict native transport smoke with an open-rdma checkout in mock mode:
+
+```sh
+hack/rdma-native-smoke-test.sh --mock-rdma DIR
 ```
 
 Run a configurable local stress pass:
