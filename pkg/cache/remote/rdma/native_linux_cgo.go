@@ -20,6 +20,7 @@ package rdma
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,11 +34,14 @@ import (
 	"github.com/juicedata/juicefs/pkg/cache/remote/rdma/protocol"
 )
 
+const nativeHandshakeFrameBytes = 64 << 10
+
 type nativeOptions struct {
-	deviceIndex   int
-	maxFrameBytes int
-	cqTimeout     time.Duration
-	requireDevice bool
+	deviceIndex     int
+	maxFrameBytes   int
+	cqTimeout       time.Duration
+	requireDevice   bool
+	resourceFactory nativeResourceFactory
 }
 
 type nativeDialer struct {
@@ -46,9 +50,31 @@ type nativeDialer struct {
 
 type nativeConn struct {
 	conn          net.Conn
+	resources     nativeResource
 	maxFrameBytes int
 	mu            sync.Mutex
 }
+
+type nativeEndpointWire struct {
+	LID   uint16 `json:"lid"`
+	QPN   uint32 `json:"qpn"`
+	PSN   uint32 `json:"psn"`
+	RKey  uint32 `json:"rkey"`
+	VAddr uint64 `json:"vaddr"`
+	Port  uint8  `json:"port"`
+}
+
+type nativeResource interface {
+	LocalEndpoint() (native.Endpoint, error)
+	Connect(native.Endpoint) error
+	Close() error
+}
+
+type nativeResourceFactory interface {
+	New(deviceIndex, maxFrameBytes int) (nativeResource, error)
+}
+
+type ibverbsResourceFactory struct{}
 
 func newNativeDialerFromEnv() Dialer {
 	options, err := nativeOptionsFromEnv()
@@ -110,10 +136,11 @@ func nativeOptionsFromEnv() (nativeOptions, error) {
 		return nativeOptions{}, err
 	}
 	return nativeOptions{
-		deviceIndex:   deviceIndex,
-		maxFrameBytes: maxFrameBytes(maxFrame),
-		cqTimeout:     cqTimeout,
-		requireDevice: requireDevice,
+		deviceIndex:     deviceIndex,
+		maxFrameBytes:   maxFrameBytes(maxFrame),
+		cqTimeout:       cqTimeout,
+		requireDevice:   requireDevice,
+		resourceFactory: ibverbsResourceFactory{},
 	}, nil
 }
 
@@ -154,20 +181,32 @@ func parseEnvBool(name string, defaultValue bool) (bool, error) {
 }
 
 func (d *nativeDialer) Dial(ctx context.Context, node string, options Options) (Conn, error) {
-	resources, err := native.NewResources(d.options.deviceIndex, d.options.maxFrameBytes)
+	resourceFactory := d.options.resourceFactory
+	if resourceFactory == nil {
+		resourceFactory = ibverbsResourceFactory{}
+	}
+	resources, err := resourceFactory.New(d.options.deviceIndex, d.options.maxFrameBytes)
 	if err != nil {
 		if d.options.requireDevice || !errors.Is(err, native.ErrNoDevice) {
 			return nil, err
 		}
-	} else {
-		_ = resources.Close()
 	}
 	netDialer := net.Dialer{Timeout: options.Timeout}
 	conn, err := netDialer.DialContext(ctx, "tcp", node)
 	if err != nil {
+		if resources != nil {
+			_ = resources.Close()
+		}
 		return nil, err
 	}
-	return &nativeConn{conn: conn, maxFrameBytes: d.options.maxFrameBytes}, nil
+	if resources != nil {
+		if err := clientNativeHandshake(ctx, conn, resources); err != nil {
+			_ = resources.Close()
+			_ = conn.Close()
+			return nil, err
+		}
+	}
+	return &nativeConn{conn: conn, resources: resources, maxFrameBytes: d.options.maxFrameBytes}, nil
 }
 
 func (c *nativeConn) RoundTrip(ctx context.Context, req protocol.Request) (protocol.Response, error) {
@@ -196,11 +235,122 @@ func (c *nativeConn) RoundTrip(ctx context.Context, req protocol.Request) (proto
 }
 
 func (c *nativeConn) Close() error {
-	return c.conn.Close()
+	var err error
+	if c.resources != nil {
+		err = errors.Join(err, c.resources.Close())
+		c.resources = nil
+	}
+	err = errors.Join(err, c.conn.Close())
+	return err
+}
+
+func encodeNativeEndpoint(endpoint native.Endpoint) ([]byte, error) {
+	return json.Marshal(nativeEndpointWire{
+		LID:   endpoint.LID,
+		QPN:   endpoint.QPN,
+		PSN:   endpoint.PSN,
+		RKey:  endpoint.RKey,
+		VAddr: endpoint.VAddr,
+		Port:  endpoint.Port,
+	})
+}
+
+func decodeNativeEndpoint(data []byte) (native.Endpoint, error) {
+	var wire nativeEndpointWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return native.Endpoint{}, err
+	}
+	return native.Endpoint{
+		LID:   wire.LID,
+		QPN:   wire.QPN,
+		PSN:   wire.PSN,
+		RKey:  wire.RKey,
+		VAddr: wire.VAddr,
+		Port:  wire.Port,
+	}, nil
+}
+
+func clientNativeHandshake(ctx context.Context, conn net.Conn, resources nativeResource) error {
+	local, err := resources.LocalEndpoint()
+	if err != nil {
+		return err
+	}
+	localFrame, err := encodeNativeEndpoint(local)
+	if err != nil {
+		return err
+	}
+	if err := writeHandshakeFrame(ctx, conn, localFrame); err != nil {
+		return err
+	}
+	remoteFrame, err := readHandshakeFrame(ctx, conn)
+	if err != nil {
+		return err
+	}
+	remote, err := decodeNativeEndpoint(remoteFrame)
+	if err != nil {
+		return err
+	}
+	return resources.Connect(remote)
+}
+
+func serverNativeHandshake(ctx context.Context, conn net.Conn, resources nativeResource) error {
+	remoteFrame, err := readHandshakeFrame(ctx, conn)
+	if err != nil {
+		return err
+	}
+	remote, err := decodeNativeEndpoint(remoteFrame)
+	if err != nil {
+		return err
+	}
+	local, err := resources.LocalEndpoint()
+	if err != nil {
+		return err
+	}
+	localFrame, err := encodeNativeEndpoint(local)
+	if err != nil {
+		return err
+	}
+	if err := writeHandshakeFrame(ctx, conn, localFrame); err != nil {
+		return err
+	}
+	return resources.Connect(remote)
+}
+
+func readHandshakeFrame(ctx context.Context, conn net.Conn) ([]byte, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetReadDeadline(deadline)
+		defer conn.SetReadDeadline(time.Time{})
+	}
+	return readFrame(conn, nativeHandshakeFrameBytes)
+}
+
+func writeHandshakeFrame(ctx context.Context, conn net.Conn, payload []byte) error {
+	frame, err := encodeFrame(payload, nativeHandshakeFrameBytes)
+	if err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetWriteDeadline(deadline)
+		defer conn.SetWriteDeadline(time.Time{})
+	}
+	return writeAll(conn, frame)
 }
 
 func serveNativeConn(ctx context.Context, conn net.Conn, server *Server, maxFrameBytes int) {
+	serveNativeConnWithResourceFactory(ctx, conn, server, maxFrameBytes, ibverbsResourceFactory{})
+}
+
+func serveNativeConnWithResourceFactory(ctx context.Context, conn net.Conn, server *Server, maxFrameBytes int, resourceFactory nativeResourceFactory) {
 	defer conn.Close()
+	resources, err := resourceFactory.New(0, maxFrameBytes)
+	if err == nil {
+		defer resources.Close()
+		if err := serverNativeHandshake(ctx, conn, resources); err != nil {
+			return
+		}
+	} else if !errors.Is(err, native.ErrNoDevice) {
+		return
+	}
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -231,6 +381,14 @@ func serveNativeConn(ctx context.Context, conn net.Conn, server *Server, maxFram
 			return
 		}
 	}
+}
+
+func (ibverbsResourceFactory) New(deviceIndex, maxFrameBytes int) (nativeResource, error) {
+	resources, err := native.NewResources(deviceIndex, maxFrameBytes)
+	if resources == nil {
+		return nil, err
+	}
+	return resources, err
 }
 
 func writeAll(conn net.Conn, data []byte) error {

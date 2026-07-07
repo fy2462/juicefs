@@ -114,3 +114,29 @@ func TestNativeDialerRequiresDeviceWhenConfigured(t *testing.T) {
 	require.Nil(t, conn)
 	require.True(t, errors.Is(err, native.ErrNoDevice))
 }
+
+func TestNativeDialerFallsBackWhenDeviceIsUnavailable(t *testing.T) {
+	resources, err := native.NewResources(1<<20, defaultRDMAFrameBytes)
+	require.Nil(t, resources)
+	require.True(t, errors.Is(err, native.ErrNoDevice), "unexpected resource error: %v", err)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err == nil {
+			accepted <- conn
+		}
+	}()
+
+	dialer := &nativeDialer{options: nativeOptions{
+		deviceIndex:   1 << 20,
+		maxFrameBytes: defaultRDMAFrameBytes,
+	}}
+	conn, err := dialer.Dial(context.Background(), ln.Addr().String(), Options{Timeout: time.Second})
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	(<-accepted).Close()
+}
