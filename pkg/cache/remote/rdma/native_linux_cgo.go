@@ -37,6 +37,7 @@ type nativeOptions struct {
 	deviceIndex   int
 	maxFrameBytes int
 	cqTimeout     time.Duration
+	requireDevice bool
 }
 
 type nativeDialer struct {
@@ -104,10 +105,15 @@ func nativeOptionsFromEnv() (nativeOptions, error) {
 	if err != nil {
 		return nativeOptions{}, err
 	}
+	requireDevice, err := parseEnvBool("JFS_RDMA_REQUIRE_DEVICE", false)
+	if err != nil {
+		return nativeOptions{}, err
+	}
 	return nativeOptions{
 		deviceIndex:   deviceIndex,
 		maxFrameBytes: maxFrameBytes(maxFrame),
 		cqTimeout:     cqTimeout,
+		requireDevice: requireDevice,
 	}, nil
 }
 
@@ -135,12 +141,27 @@ func parseEnvDuration(name string, defaultValue time.Duration) (time.Duration, e
 	return parsed, nil
 }
 
+func parseEnvBool(name string, defaultValue bool) (bool, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return defaultValue, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", name, err)
+	}
+	return parsed, nil
+}
+
 func (d *nativeDialer) Dial(ctx context.Context, node string, options Options) (Conn, error) {
 	resources, err := native.NewResources(d.options.deviceIndex, d.options.maxFrameBytes)
 	if err != nil {
-		return nil, err
+		if d.options.requireDevice || !errors.Is(err, native.ErrNoDevice) {
+			return nil, err
+		}
+	} else {
+		_ = resources.Close()
 	}
-	_ = resources.Close()
 	netDialer := net.Dialer{Timeout: options.Timeout}
 	conn, err := netDialer.DialContext(ctx, "tcp", node)
 	if err != nil {

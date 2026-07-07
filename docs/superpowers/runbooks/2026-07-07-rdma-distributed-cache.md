@@ -90,6 +90,7 @@ Native transport build-time and runtime knobs:
 | `JFS_RDMA_DEVICE_INDEX` | `0` | RDMA device index passed to native resource setup. |
 | `JFS_RDMA_MAX_FRAME_BYTES` | `4194304` | Maximum protocol frame size; values below 64 KiB are raised to 64 KiB. |
 | `JFS_RDMA_CQ_TIMEOUT` | `50ms` | Completion queue timeout placeholder for the verbs data path. |
+| `JFS_RDMA_REQUIRE_DEVICE` | `false` | When `true`, native client dial fails if no ibverbs/open-rdma device is available. Use this on hosts intended to prove real verbs readiness. |
 
 ## Smoke Coverage
 
@@ -119,10 +120,11 @@ PATH=/usr/local/go/bin:$PATH go test -tags rdma ./pkg/cache/remote/rdma/...
 ```
 
 The `rdma` build tag now compiles the native transport boundary, a libibverbs
-resource skeleton, and a framed protocol server/client path. The data movement
-path is still the staged frame protocol used by the native smoke; the remaining
-production gap is replacing the framed TCP transfer with real verbs queue-pair
-send/receive operations and completion handling.
+resource lifecycle that opens devices and allocates PD/CQ/MR buffers when an
+RDMA device is available, and a framed protocol server/client path. The data
+movement path is still the staged frame protocol used by the native smoke; the
+remaining production gap is replacing the framed TCP transfer with real verbs
+queue-pair send/receive operations and completion handling.
 
 ## Native Smoke And Stress
 

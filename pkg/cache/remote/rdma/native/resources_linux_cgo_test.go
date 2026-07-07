@@ -36,3 +36,30 @@ func TestFrameLimitDefaultsAndMinimum(t *testing.T) {
 	require.Equal(t, minFrameBytes, frameLimit(1))
 	require.Equal(t, 128<<10, frameLimit(128<<10))
 }
+
+func TestNewResourcesRejectsUnavailableDeviceIndex(t *testing.T) {
+	resources, err := NewResources(1<<20, 0)
+
+	require.Nil(t, resources)
+	require.ErrorIs(t, err, ErrNoDevice)
+}
+
+func TestNewResourcesAllocatesVerbsObjectsWhenDeviceExists(t *testing.T) {
+	count, err := DeviceCount()
+	require.NoError(t, err)
+	if count == 0 {
+		t.Skip("no RDMA devices available")
+	}
+
+	resources, err := NewResources(0, 128<<10)
+	require.NoError(t, err)
+	require.NotNil(t, resources)
+	require.NotNil(t, resources.context)
+	require.NotNil(t, resources.protectionDomain)
+	require.NotNil(t, resources.completionQueue)
+	require.NotNil(t, resources.memoryRegion)
+	require.NotNil(t, resources.buffer)
+	require.Len(t, resources.buffer, 128<<10)
+	require.NoError(t, resources.Close())
+	require.NoError(t, resources.Close())
+}

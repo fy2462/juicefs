@@ -20,4 +20,7 @@ package native
 
 import "errors"
 
-var ErrInvalidDeviceIndex = errors.New("invalid RDMA device index")
+var (
+	ErrInvalidDeviceIndex = errors.New("invalid RDMA device index")
+	ErrNoDevice           = errors.New("RDMA device is not available")
+)

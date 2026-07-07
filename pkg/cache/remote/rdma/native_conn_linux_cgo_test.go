@@ -20,11 +20,13 @@ package rdma
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/juicedata/juicefs/pkg/cache/remote/mock"
+	"github.com/juicedata/juicefs/pkg/cache/remote/rdma/native"
 	"github.com/juicedata/juicefs/pkg/cache/remote/rdma/protocol"
 	"github.com/stretchr/testify/require"
 )
@@ -91,10 +93,24 @@ func TestNativeOptionsFromEnv(t *testing.T) {
 	t.Setenv("JFS_RDMA_DEVICE_INDEX", "2")
 	t.Setenv("JFS_RDMA_MAX_FRAME_BYTES", "131072")
 	t.Setenv("JFS_RDMA_CQ_TIMEOUT", "25ms")
+	t.Setenv("JFS_RDMA_REQUIRE_DEVICE", "true")
 
 	options, err := nativeOptionsFromEnv()
 	require.NoError(t, err)
 	require.Equal(t, 2, options.deviceIndex)
 	require.Equal(t, 131072, options.maxFrameBytes)
 	require.Equal(t, 25*time.Millisecond, options.cqTimeout)
+	require.True(t, options.requireDevice)
+}
+
+func TestNativeDialerRequiresDeviceWhenConfigured(t *testing.T) {
+	dialer := &nativeDialer{options: nativeOptions{
+		deviceIndex:   1 << 20,
+		maxFrameBytes: defaultRDMAFrameBytes,
+		requireDevice: true,
+	}}
+
+	conn, err := dialer.Dial(context.Background(), "127.0.0.1:1", Options{Timeout: time.Millisecond})
+	require.Nil(t, conn)
+	require.True(t, errors.Is(err, native.ErrNoDevice))
 }
