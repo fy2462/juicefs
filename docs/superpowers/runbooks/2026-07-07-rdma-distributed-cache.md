@@ -203,9 +203,12 @@ make test.rdma-compose-three-node
 
 This compose smoke uses the HTTP remote-cache transport to validate real
 container-level node identity, one-L2-node failure, all-L2-down L1+L3 fallback,
-and L2+L3-down failure. The native RDMA data path remains covered by the
-open-rdma mock mounted smoke targets because the mock verbs provider depends on
-host RDMA mock setup rather than ordinary Docker bridge networking.
+and L2+L3-down failure. It also asserts that
+`juicefs_remote_cache_gets_total{result="hit"}` increases during the surviving
+L2 read and that `juicefs_remote_cache_fallbacks_total` increases during the
+all-L2-down L3 read. The native RDMA data path remains covered by the open-rdma
+mock mounted smoke targets because the mock verbs provider depends on host RDMA
+mock setup rather than ordinary Docker bridge networking.
 
 Run mounted native RDMA L2 failover with two L2 nodes, single-node L2 failure,
 all-L2-down L1+L3 fallback, and L2+L3-down failure:

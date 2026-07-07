@@ -8,6 +8,7 @@ SECRET_KEY="rustfsadmin"
 ROOT="/tmp/jfs-compose-three-node"
 MNT="$ROOT/mnt"
 PAYLOAD="docker-compose-three-node"
+METRICS_PORT="${METRICS_PORT:-}"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -57,6 +58,52 @@ wait_for_mount() {
   fail "timed out waiting for mount: $path"
 }
 
+wait_for_metrics() {
+  port="$1"
+  i=0
+  last=""
+  while [ "$i" -lt 300 ]; do
+    if curl -fsS "http://127.0.0.1:$port/metrics" >/dev/null 2>&1; then
+      return
+    fi
+    last="$(curl -fsS "http://127.0.0.1:$port/metrics" 2>&1 >/dev/null || true)"
+    i=$((i + 1))
+    sleep 0.1
+  done
+  fail "timed out waiting for mount metrics on port $port ${last}"
+}
+
+metric_value() {
+  port="$1"
+  metric="$2"
+  labels="${3:-}"
+  curl -fsS "http://127.0.0.1:$port/metrics" |
+    awk -v metric="$metric" -v labels="$labels" '
+      $0 ~ /^#/ {
+        next
+      }
+      $1 ~ ("^" metric "(\\{|$)") {
+        if (labels == "" || index($0, labels) > 0) {
+          value = $NF
+        }
+      }
+      END {
+        if (value == "") {
+          print "0"
+        } else {
+          print value
+        }
+      }'
+}
+
+assert_metric_gt() {
+  after="$1"
+  before="$2"
+  message="$3"
+  awk -v after="$after" -v before="$before" 'BEGIN { exit !(after > before) }' ||
+    fail "$message: before=$before after=$after"
+}
+
 wait_for_l2_entries() {
   dir="$1"
   i=0
@@ -84,14 +131,27 @@ mount_jfs() {
   cache_dir="$1"
   shift
   mkdir -p "$cache_dir" "$MNT"
-  juicefs mount \
-    --no-usage-report \
-    --cache-dir "$cache_dir" \
-    --cache-size 64 \
-    "$@" \
-    "$META_URL" "$MNT" &
+  if [ -n "${METRICS_PORT:-}" ]; then
+    juicefs mount \
+      --no-usage-report \
+      --cache-dir "$cache_dir" \
+      --cache-size 64 \
+      --metrics "127.0.0.1:$METRICS_PORT" \
+      "$@" \
+      "$META_URL" "$MNT" &
+  else
+    juicefs mount \
+      --no-usage-report \
+      --cache-dir "$cache_dir" \
+      --cache-size 64 \
+      "$@" \
+      "$META_URL" "$MNT" &
+  fi
   MOUNT_PID=$!
   wait_for_mount "$MNT"
+  if [ -n "${METRICS_PORT:-}" ]; then
+    wait_for_metrics "$METRICS_PORT"
+  fi
 }
 
 mount_with_remote_cache() {
@@ -144,17 +204,27 @@ prepare() {
 }
 
 read_surviving_l2() {
+  METRICS_PORT=9571
   mount_with_remote_cache "$ROOT/l1-read-surviving-l2" "l2-node-1:9568,l2-node-2:9568" 2
+  hit_before="$(metric_value "$METRICS_PORT" "juicefs_remote_cache_gets_total" 'result="hit"')"
   grep -F "$PAYLOAD" "$MNT/payload.txt" >/dev/null
+  hit_after="$(metric_value "$METRICS_PORT" "juicefs_remote_cache_gets_total" 'result="hit"')"
+  assert_metric_gt "$hit_after" "$hit_before" "remote cache hit metric did not increase for surviving L2 read"
   unmount_jfs "$MNT" "$MOUNT_PID"
+  METRICS_PORT=
   echo "ok - docker compose three-node read survives one L2 node and L3 outage"
 }
 
 read_l3_fallback() {
   wait_for_http rustfs 9000
+  METRICS_PORT=9572
   mount_with_remote_cache "$ROOT/l1-read-l3-fallback" "l2-node-1:9568,l2-node-2:9568" 2
+  fallback_before="$(metric_value "$METRICS_PORT" "juicefs_remote_cache_fallbacks_total")"
   grep -F "$PAYLOAD" "$MNT/payload.txt" >/dev/null
+  fallback_after="$(metric_value "$METRICS_PORT" "juicefs_remote_cache_fallbacks_total")"
+  assert_metric_gt "$fallback_after" "$fallback_before" "remote cache fallback metric did not increase for all-L2-down L3 read"
   unmount_jfs "$MNT" "$MOUNT_PID"
+  METRICS_PORT=
   echo "ok - docker compose three-node read falls back to L3 when all L2 nodes stop"
 }
 

@@ -42,6 +42,7 @@ assert_contains "without an RDMA device"
 assert_contains "juicefs_remote_cache_node_down"
 assert_contains "juicefs_remote_cache_node_skips_total"
 assert_contains "juicefs_remote_cache_node_probe_total"
+assert_contains 'juicefs_remote_cache_gets_total{result="hit"}'
 assert_contains "juicefs_remote_cache_fallbacks_total"
 
 test -f "$ALERTS" || fail "missing RDMA cache alert rules: $ALERTS"
