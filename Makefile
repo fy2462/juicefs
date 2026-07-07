@@ -129,6 +129,9 @@ test.three-tier-cache-rustfs:
 test.rdma-native-smoke:
 	./hack/rdma-native-smoke-test.sh
 
+test.rdma-native-strict:
+	./hack/rdma-native-smoke-test.sh --strict-device
+
 test.rdma-native-stress:
 	JFS_RDMA_SMOKE_OPS=$${JFS_RDMA_STRESS_OPS:-500} JFS_RDMA_SMOKE_CONCURRENCY=$${JFS_RDMA_STRESS_CONCURRENCY:-8} ./hack/rdma-native-smoke-test.sh
 

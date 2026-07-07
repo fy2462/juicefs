@@ -6,6 +6,38 @@ TMP_DIR="${TMPDIR:-/tmp}/jfs-rdma-native-smoke.$$"
 ADDR="${JFS_RDMA_SMOKE_ADDR:-127.0.0.1:19568}"
 TESTS_RUN=0
 SERVER_PID=""
+STRICT_DEVICE="${JFS_RDMA_REQUIRE_DEVICE:-false}"
+
+usage() {
+  cat <<'EOF'
+Usage: hack/rdma-native-smoke-test.sh [--strict-device]
+
+Runs the rdma-cache-server native transport smoke. By default the smoke can
+fall back to the framed TCP path when no RDMA device exists, which keeps normal
+CI hardware-independent.
+
+Options:
+  --strict-device   Require an ibverbs/open-rdma device and force payloads
+                    through native RDMA resources with JFS_RDMA_REQUIRE_DEVICE.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --strict-device)
+      STRICT_DEVICE=true
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
 
 cleanup() {
   if [ -n "$SERVER_PID" ]; then
@@ -56,6 +88,36 @@ require_native_build() {
     echo "SKIP: native RDMA smoke requires CGO_ENABLED=1"
     exit 0
   fi
+}
+
+require_rdma_device_for_strict() {
+  [ "$STRICT_DEVICE" = "true" ] || return 0
+  checker="$TMP_DIR/check-rdma-device.go"
+  cat > "$checker" <<'EOF'
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/juicedata/juicefs/pkg/cache/remote/rdma/native"
+)
+
+func main() {
+	count, err := native.DeviceCount()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println(count)
+}
+EOF
+  count="$(cd "$ROOT_DIR" && go run -tags rdma "$checker")" || fail "strict native RDMA smoke could not inspect RDMA devices"
+  if [ "$count" -gt 0 ]; then
+    return 0
+  fi
+  echo "SKIP: strict native RDMA smoke requires an ibverbs/open-rdma device"
+  exit 0
 }
 
 write_client() {
@@ -220,7 +282,7 @@ start_server() {
   bin="$1"
   cache_dir="$TMP_DIR/cache"
   mkdir -p "$cache_dir"
-  "$bin" rdma-cache-server \
+  JFS_RDMA_REQUIRE_DEVICE="$STRICT_DEVICE" "$bin" rdma-cache-server \
     --listen "$ADDR" \
     --transport rdma \
     --cache-dir "$cache_dir" \
@@ -229,12 +291,13 @@ start_server() {
 }
 
 run_client() {
-  (cd "$ROOT_DIR" && go run -tags rdma "$TMP_DIR/client.go" "$ADDR")
+  (cd "$ROOT_DIR" && JFS_RDMA_REQUIRE_DEVICE="$STRICT_DEVICE" go run -tags rdma "$TMP_DIR/client.go" "$ADDR")
 }
 
 mkdir -p "$TMP_DIR"
 ensure_go_env
 require_native_build
+require_rdma_device_for_strict
 write_client
 server_bin="$(build_server)"
 pass "built rdma-tagged juicefs binary"

@@ -30,6 +30,11 @@ on:
         description: "Run the build with tmate debugging enabled"
         required: false
         default: false
+      strict-native:
+        type: boolean
+        description: "Run strict native RDMA smoke; requires ibverbs/open-rdma device"
+        required: false
+        default: false
 
 jobs:
   default-build:
@@ -84,6 +89,11 @@ jobs:
       - name: Run native RDMA smoke
         run: |
           make test.rdma-native-smoke
+
+      - name: Run strict native RDMA smoke
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.strict-native == 'true'
+        run: |
+          make test.rdma-native-strict
 
       - name: Setup upterm session
         if: failure() && (github.event.inputs.debug == 'true' || github.run_attempt != 1)

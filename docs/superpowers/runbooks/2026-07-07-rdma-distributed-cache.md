@@ -128,10 +128,10 @@ QPs through INIT/RTR/RTS. The native package also has minimal verbs
 test that runs when an ibverbs/open-rdma device exists. The data movement path
 has a resource-backed frame exchange path on both client and server when native
 resources exist. The default native smoke can still fall back to the staged TCP
-frame path when no RDMA device exists; the remaining production gap is adding a
-strict native smoke that sets `JFS_RDMA_REQUIRE_DEVICE=true` to prove payloads
-travel through verbs instead of TCP fallback, then removing the fallback from
-strict native deployments.
+frame path when no RDMA device exists. The strict native smoke sets
+`JFS_RDMA_REQUIRE_DEVICE=true`; on a host with an ibverbs/open-rdma device, this
+proves payloads travel through verbs instead of TCP fallback. On a host without
+such a device, it prints a clear SKIP.
 
 ## Native Smoke And Stress
 
@@ -139,6 +139,12 @@ Run the direct native transport smoke:
 
 ```sh
 make test.rdma-native-smoke
+```
+
+Run strict native transport smoke on an open-rdma or real RDMA host:
+
+```sh
+make test.rdma-native-strict
 ```
 
 Run a configurable local stress pass:
@@ -150,7 +156,8 @@ JFS_RDMA_STRESS_OPS=5000 JFS_RDMA_STRESS_CONCURRENCY=16 make test.rdma-native-st
 The stress harness builds a `rdma` tagged `juicefs`, starts
 `rdma-cache-server --transport=rdma`, and runs concurrent PUT/GET/DELETE
 round trips through the RDMA client. It is a correctness and regression stress,
-not a final RDMA bandwidth benchmark until the verbs data path is complete.
+not a final RDMA bandwidth benchmark until strict native smoke is running on an
+RDMA-capable host.
 
 ## Metrics
 
