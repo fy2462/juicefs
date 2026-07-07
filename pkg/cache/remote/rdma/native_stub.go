@@ -1,4 +1,4 @@
-//go:build !rdma
+//go:build rdma && (!linux || !cgo)
 
 /*
  * JuiceFS, Copyright 2026 Juicedata, Inc.
@@ -18,23 +18,7 @@
 
 package rdma
 
-import (
-	"context"
-
-	"github.com/juicedata/juicefs/pkg/cache/remote"
-)
-
-func NewClient(options Options) remote.Client {
-	return newClient(options)
-}
-
-func Capability() CapabilityInfo {
-	return CapabilityInfo{
-		Built:     false,
-		Available: false,
-		Reason:    ErrUnsupported.Error(),
-	}
-}
+import "context"
 
 func ListenAndServe(ctx context.Context, options ServeOptions) error {
 	if err := ctx.Err(); err != nil {

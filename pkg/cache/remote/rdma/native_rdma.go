@@ -19,6 +19,7 @@
 package rdma
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +29,13 @@ import (
 
 func NewClient(options Options) remote.Client {
 	return newClient(options)
+}
+
+func ListenAndServe(ctx context.Context, options ServeOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return ErrUnsupported
 }
 
 func Capability() CapabilityInfo {

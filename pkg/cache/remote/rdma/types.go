@@ -37,6 +37,12 @@ type CapabilityInfo struct {
 	Reason    string
 }
 
+type ServeOptions struct {
+	Listen        string
+	Backend       remote.Client
+	MaxFrameBytes int
+}
+
 type Options struct {
 	Nodes         []string
 	Timeout       time.Duration

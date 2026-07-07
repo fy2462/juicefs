@@ -51,6 +51,15 @@ func TestCapabilityDefaultBuild(t *testing.T) {
 	require.NotEmpty(t, capability.Reason)
 }
 
+func TestListenAndServeDefaultBuildUnsupported(t *testing.T) {
+	err := ListenAndServe(context.Background(), ServeOptions{
+		Listen:  "127.0.0.1:0",
+		Backend: mock.NewClient(),
+	})
+
+	require.ErrorIs(t, err, ErrUnsupported)
+}
+
 func TestServerHandleFrameUsesProtocolExecutor(t *testing.T) {
 	backend := mock.NewClient()
 	server := NewServer(backend)
