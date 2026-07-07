@@ -154,11 +154,17 @@ Run a configurable local stress pass:
 JFS_RDMA_STRESS_OPS=5000 JFS_RDMA_STRESS_CONCURRENCY=16 make test.rdma-native-stress
 ```
 
+Run the same stress workload in strict native mode on an RDMA-capable host:
+
+```sh
+JFS_RDMA_STRESS_OPS=5000 JFS_RDMA_STRESS_CONCURRENCY=16 make test.rdma-native-strict-stress
+```
+
 The stress harness builds a `rdma` tagged `juicefs`, starts
 `rdma-cache-server --transport=rdma`, and runs concurrent PUT/GET/DELETE
 round trips through the RDMA client. It is a correctness and regression stress,
-not a final RDMA bandwidth benchmark until strict native smoke is running on an
-RDMA-capable host.
+not a final bandwidth benchmark; use the strict target when the host has
+open-rdma or real RDMA devices and you need proof that fallback is disabled.
 
 ## Metrics
 

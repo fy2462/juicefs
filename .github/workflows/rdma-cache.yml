@@ -94,6 +94,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.strict-native == 'true'
         run: |
           make test.rdma-native-strict
+          JFS_RDMA_STRESS_OPS=100 JFS_RDMA_STRESS_CONCURRENCY=4 make test.rdma-native-strict-stress
 
       - name: Setup upterm session
         if: failure() && (github.event.inputs.debug == 'true' || github.run_attempt != 1)
