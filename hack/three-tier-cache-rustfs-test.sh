@@ -6,7 +6,7 @@ TMP_DIR="${TMPDIR:-/tmp}/jfs-three-tier-cache-rustfs.$$"
 TESTS_RUN=0
 
 cleanup() {
-  stop_remote_cache_server
+  stop_remote_cache_servers
   stop_rustfs
   rm -rf "$TMP_DIR"
 }
@@ -150,6 +150,26 @@ wait_for_remote_cache_entries() {
   fail "timed out waiting for $min_entries remote cache entries in $dir"
 }
 
+remote_cache_entry_count() {
+  dir="$1"
+  find "$dir" -name '*.data' -type f 2>/dev/null | wc -l | tr -d ' '
+}
+
+wait_for_remote_cache_entries_gt() {
+  dir="$1"
+  previous="$2"
+  i=0
+  while [ "$i" -lt 100 ]; do
+    entries="$(remote_cache_entry_count "$dir")"
+    if [ "$entries" -gt "$previous" ]; then
+      return
+    fi
+    i=$((i + 1))
+    sleep 0.1
+  done
+  fail "timed out waiting for remote cache entries in $dir to exceed $previous"
+}
+
 unmount_jfs() {
   mountpoint="$1"
   mount_pid="${2:-}"
@@ -206,23 +226,43 @@ stop_rustfs() {
 start_remote_cache_server() {
   remote_dir="$TMP_DIR/l2-cache"
   remote_log="$TMP_DIR/rdma-cache-server.log"
-  mkdir -p "$remote_dir"
+  start_remote_cache_server_at 9568 "$remote_dir" "$remote_log"
   REMOTE_CACHE_DIR="$remote_dir"
-  export REMOTE_CACHE_DIR
+  REMOTE_CACHE_PID="$LAST_REMOTE_CACHE_PID"
+  export REMOTE_CACHE_DIR REMOTE_CACHE_PID
+}
+
+start_remote_cache_server_at() {
+  port="$1"
+  remote_dir="$2"
+  remote_log="$3"
+  mkdir -p "$remote_dir"
   "$ROOT_DIR/juicefs" rdma-cache-server \
-    --listen 127.0.0.1:9568 \
+    --listen "127.0.0.1:$port" \
     --transport http \
     --cache-dir "$remote_dir" \
     --cache-size 64M >"$remote_log" 2>&1 &
-  REMOTE_CACHE_PID=$!
-  export REMOTE_CACHE_PID
+  LAST_REMOTE_CACHE_PID=$!
+  REMOTE_CACHE_PIDS="${REMOTE_CACHE_PIDS:-} $LAST_REMOTE_CACHE_PID"
+  export LAST_REMOTE_CACHE_PID REMOTE_CACHE_PIDS
+}
+
+stop_remote_cache_pid() {
+  pid="$1"
+  if [ -n "$pid" ]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
 }
 
 stop_remote_cache_server() {
-  if [ -n "${REMOTE_CACHE_PID:-}" ]; then
-    kill "$REMOTE_CACHE_PID" 2>/dev/null || true
-    wait "$REMOTE_CACHE_PID" 2>/dev/null || true
-  fi
+  stop_remote_cache_pid "${REMOTE_CACHE_PID:-}"
+}
+
+stop_remote_cache_servers() {
+  for pid in ${REMOTE_CACHE_PIDS:-}; do
+    stop_remote_cache_pid "$pid"
+  done
 }
 
 run_s3_baseline() {
@@ -345,6 +385,8 @@ run_l2_down_fallback_path() {
   mkdir -p "$mountpoint" "$l1a" "$l1b" "$l1c"
 
   start_rustfs
+  start_remote_cache_server
+  wait_for_http 127.0.0.1 9568
 
   "$ROOT_DIR/juicefs" format \
     --storage s3 \
@@ -407,6 +449,138 @@ run_l2_down_fallback_path() {
   unmount_jfs "$mountpoint" "$mount_pid"
 }
 
+run_multi_node_l2_recovery_path() {
+  meta="$TMP_DIR/multi-l2-meta.db"
+  mountpoint="$TMP_DIR/multi-l2-mnt"
+  l1a="$TMP_DIR/multi-l2-l1-a"
+  l1fill="$TMP_DIR/multi-l2-l1-fill"
+  l1b="$TMP_DIR/multi-l2-l1-b"
+  l1c="$TMP_DIR/multi-l2-l1-c"
+  l1d="$TMP_DIR/multi-l2-l1-d"
+  node1_dir="$TMP_DIR/l2-node-1"
+  node2_dir="$TMP_DIR/l2-node-2"
+  mkdir -p "$mountpoint" "$l1a" "$l1fill" "$l1b" "$l1c" "$l1d"
+
+  start_rustfs
+  start_remote_cache_server_at 9568 "$node1_dir" "$TMP_DIR/rdma-cache-node-1.log"
+  node1_pid="$LAST_REMOTE_CACHE_PID"
+  start_remote_cache_server_at 9569 "$node2_dir" "$TMP_DIR/rdma-cache-node-2.log"
+  node2_pid="$LAST_REMOTE_CACHE_PID"
+  wait_for_http 127.0.0.1 9568
+  wait_for_http 127.0.0.1 9569
+
+  "$ROOT_DIR/juicefs" format \
+    --storage s3 \
+    --bucket "$RUSTFS_BUCKET_URL" \
+    --access-key "$RUSTFS_ACCESS_KEY" \
+    --secret-key "$RUSTFS_SECRET_KEY" \
+    --trash-days 0 \
+    "sqlite3://$meta" multi-l2-jfs
+
+  "$ROOT_DIR/juicefs" mount \
+    --cache-dir "$l1a" \
+    --cache-size 64 \
+    --remote-cache rdma \
+    --remote-cache-transport http \
+    --remote-cache-nodes 127.0.0.1:9568,127.0.0.1:9569 \
+    --remote-cache-replicas 2 \
+    --remote-cache-fill-local=true \
+    --remote-cache-fill-remote=true \
+    "sqlite3://$meta" "$mountpoint" &
+  mount_pid=$!
+  wait_for_mount "$mountpoint"
+  dd if=/dev/zero bs=1048576 count=1 2>/dev/null | tr '\000' 'B' > "$mountpoint/blob.bin"
+  sync
+  unmount_jfs "$mountpoint" "$mount_pid"
+
+  "$ROOT_DIR/juicefs" mount \
+    --cache-dir "$l1fill" \
+    --cache-size 64 \
+    --remote-cache rdma \
+    --remote-cache-transport http \
+    --remote-cache-nodes 127.0.0.1:9568,127.0.0.1:9569 \
+    --remote-cache-replicas 2 \
+    --remote-cache-fill-local=true \
+    --remote-cache-fill-remote=true \
+    "sqlite3://$meta" "$mountpoint" &
+  mount_pid=$!
+  wait_for_mount "$mountpoint"
+  cat "$mountpoint/blob.bin" >/dev/null
+  unmount_jfs "$mountpoint" "$mount_pid"
+  wait_for_remote_cache_entries "$node1_dir" 1
+  wait_for_remote_cache_entries "$node2_dir" 1
+
+  stop_rustfs
+  wait_for_http_down 127.0.0.1 9000
+  stop_remote_cache_pid "$node1_pid"
+  wait_for_http_down 127.0.0.1 9568
+
+  "$ROOT_DIR/juicefs" mount \
+    --cache-dir "$l1b" \
+    --cache-size 64 \
+    --remote-cache rdma \
+    --remote-cache-transport http \
+    --remote-cache-nodes 127.0.0.1:9568,127.0.0.1:9569 \
+    --remote-cache-replicas 2 \
+    --remote-cache-timeout 25ms \
+    --remote-cache-fill-local=true \
+    --remote-cache-fill-remote=true \
+    "sqlite3://$meta" "$mountpoint" &
+  mount_pid=$!
+  wait_for_mount "$mountpoint"
+  if ! cat "$mountpoint/blob.bin" > "$TMP_DIR/multi-l2-blob.bin"; then
+    unmount_jfs "$mountpoint" "$mount_pid"
+    fail "multi-node L2 read failed after one L2 node and rustfs stopped"
+  fi
+  size="$(wc -c < "$TMP_DIR/multi-l2-blob.bin" | tr -d ' ')"
+  [ "$size" = "1048576" ] || fail "unexpected multi-node blob size: $size"
+  non_b_bytes="$(tr -d 'B' < "$TMP_DIR/multi-l2-blob.bin" | wc -c | tr -d ' ')"
+  [ "$non_b_bytes" = "0" ] || fail "unexpected multi-node blob content"
+  unmount_jfs "$mountpoint" "$mount_pid"
+
+  node1_before="$(remote_cache_entry_count "$node1_dir")"
+  start_remote_cache_server_at 9568 "$node1_dir" "$TMP_DIR/rdma-cache-node-1-restart.log"
+  node1_pid="$LAST_REMOTE_CACHE_PID"
+  wait_for_http 127.0.0.1 9568
+  start_rustfs
+
+  "$ROOT_DIR/juicefs" mount \
+    --cache-dir "$l1c" \
+    --cache-size 64 \
+    --remote-cache rdma \
+    --remote-cache-transport http \
+    --remote-cache-nodes 127.0.0.1:9568,127.0.0.1:9569 \
+    --remote-cache-replicas 2 \
+    --remote-cache-fill-local=true \
+    --remote-cache-fill-remote=true \
+    "sqlite3://$meta" "$mountpoint" &
+  mount_pid=$!
+  wait_for_mount "$mountpoint"
+  printf 'multi-node-recovery\n' > "$mountpoint/recovery.txt"
+  sync
+  unmount_jfs "$mountpoint" "$mount_pid"
+
+  "$ROOT_DIR/juicefs" mount \
+    --cache-dir "$l1d" \
+    --cache-size 64 \
+    --remote-cache rdma \
+    --remote-cache-transport http \
+    --remote-cache-nodes 127.0.0.1:9568,127.0.0.1:9569 \
+    --remote-cache-replicas 2 \
+    --remote-cache-fill-local=true \
+    --remote-cache-fill-remote=true \
+    "sqlite3://$meta" "$mountpoint" &
+  mount_pid=$!
+  wait_for_mount "$mountpoint"
+  grep -F 'multi-node-recovery' "$mountpoint/recovery.txt" >/dev/null
+  unmount_jfs "$mountpoint" "$mount_pid"
+  wait_for_remote_cache_entries_gt "$node1_dir" "$node1_before"
+
+  stop_remote_cache_pid "$node1_pid"
+  stop_remote_cache_pid "$node2_pid"
+  stop_rustfs
+}
+
 main() {
   rm -rf "$TMP_DIR"
   mkdir -p "$TMP_DIR"
@@ -426,6 +600,9 @@ main() {
   pass "remote cache server starts"
   run_three_tier_read_path
   pass "three-tier read path returns data with fresh L1 after rustfs stops"
+  stop_remote_cache_server
+  run_multi_node_l2_recovery_path
+  pass "multi-node L2 survives one-node failure and recovers after restart"
   run_l2_down_fallback_path
   pass "read falls back to rustfs when remote cache server is down"
   echo "passed $TESTS_RUN tests"
