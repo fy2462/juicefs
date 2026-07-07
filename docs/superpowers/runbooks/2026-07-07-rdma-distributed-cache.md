@@ -90,7 +90,7 @@ Native transport build-time and runtime knobs:
 | `JFS_RDMA_DEVICE_INDEX` | `0` | RDMA device index passed to native resource setup. |
 | `JFS_RDMA_PORT_NUM` | `1` | RDMA port number used for local endpoint metadata and QP transitions. |
 | `JFS_RDMA_MAX_FRAME_BYTES` | `4194304` | Maximum protocol frame size; values below 64 KiB are raised to 64 KiB. |
-| `JFS_RDMA_CQ_TIMEOUT` | `50ms` | Completion queue timeout placeholder for the verbs data path. |
+| `JFS_RDMA_CQ_TIMEOUT` | `50ms` | Deadline for polling verbs send/recv completions before failing the RDMA request. |
 | `JFS_RDMA_REQUIRE_DEVICE` | `false` | When `true`, native client dial fails if no ibverbs/open-rdma device is available. Use this on hosts intended to prove real verbs readiness. |
 
 ## Smoke Coverage

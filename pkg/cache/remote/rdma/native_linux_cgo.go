@@ -77,7 +77,7 @@ type nativeResource interface {
 }
 
 type nativeResourceFactory interface {
-	New(deviceIndex int, portNum uint8, maxFrameBytes int) (nativeResource, error)
+	New(deviceIndex int, portNum uint8, maxFrameBytes int, cqTimeout time.Duration) (nativeResource, error)
 }
 
 type ibverbsResourceFactory struct{}
@@ -124,7 +124,7 @@ func ListenAndServe(ctx context.Context, options ServeOptions) error {
 			}
 			return err
 		}
-		go serveNativeConnWithResourceFactory(ctx, conn, server, maxFrame, nativeOptions.resourceFactory, nativeOptions.requireDevice, nativeOptions.deviceIndex, nativeOptions.portNum)
+		go serveNativeConnWithResourceFactory(ctx, conn, server, maxFrame, nativeOptions.resourceFactory, nativeOptions.requireDevice, nativeOptions.deviceIndex, nativeOptions.portNum, nativeOptions.cqTimeout)
 	}
 }
 
@@ -219,7 +219,11 @@ func (d *nativeDialer) Dial(ctx context.Context, node string, options Options) (
 	if portNum == 0 {
 		portNum = 1
 	}
-	resources, err := resourceFactory.New(d.options.deviceIndex, portNum, d.options.maxFrameBytes)
+	cqTimeout := d.options.cqTimeout
+	if cqTimeout == 0 {
+		cqTimeout = 50 * time.Millisecond
+	}
+	resources, err := resourceFactory.New(d.options.deviceIndex, portNum, d.options.maxFrameBytes, cqTimeout)
 	if err != nil {
 		if d.options.requireDevice || !errors.Is(err, native.ErrNoDevice) {
 			return nil, err
@@ -391,15 +395,18 @@ func writeHandshakeFrame(ctx context.Context, conn net.Conn, payload []byte) err
 }
 
 func serveNativeConn(ctx context.Context, conn net.Conn, server *Server, maxFrameBytes int) {
-	serveNativeConnWithResourceFactory(ctx, conn, server, maxFrameBytes, ibverbsResourceFactory{}, false, 0, 1)
+	serveNativeConnWithResourceFactory(ctx, conn, server, maxFrameBytes, ibverbsResourceFactory{}, false, 0, 1, 50*time.Millisecond)
 }
 
-func serveNativeConnWithResourceFactory(ctx context.Context, conn net.Conn, server *Server, maxFrameBytes int, resourceFactory nativeResourceFactory, requireDevice bool, deviceIndex int, portNum uint8) {
+func serveNativeConnWithResourceFactory(ctx context.Context, conn net.Conn, server *Server, maxFrameBytes int, resourceFactory nativeResourceFactory, requireDevice bool, deviceIndex int, portNum uint8, cqTimeout time.Duration) {
 	defer conn.Close()
 	if portNum == 0 {
 		portNum = 1
 	}
-	resources, err := resourceFactory.New(deviceIndex, portNum, maxFrameBytes)
+	if cqTimeout == 0 {
+		cqTimeout = 50 * time.Millisecond
+	}
+	resources, err := resourceFactory.New(deviceIndex, portNum, maxFrameBytes, cqTimeout)
 	if err == nil {
 		defer resources.Close()
 		if err := serverNativeHandshake(ctx, conn, resources); err != nil {
@@ -480,11 +487,12 @@ func serveNativeResourceFrame(ctx context.Context, resources nativeResource, ser
 	return err
 }
 
-func (ibverbsResourceFactory) New(deviceIndex int, portNum uint8, maxFrameBytes int) (nativeResource, error) {
+func (ibverbsResourceFactory) New(deviceIndex int, portNum uint8, maxFrameBytes int, cqTimeout time.Duration) (nativeResource, error) {
 	resources, err := native.NewResourcesWithOptions(native.ResourceOptions{
 		DeviceIndex:   deviceIndex,
 		PortNum:       portNum,
 		MaxFrameBytes: maxFrameBytes,
+		CQTimeout:     cqTimeout,
 	})
 	if resources == nil {
 		return nil, err

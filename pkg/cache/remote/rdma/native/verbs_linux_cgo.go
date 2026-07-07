@@ -43,12 +43,15 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"runtime"
+	"time"
 	"unsafe"
 )
 
 const (
 	minFrameBytes     = 64 << 10
 	defaultFrameBytes = 4 << 20
+	defaultCQTimeout  = 50 * time.Millisecond
 )
 
 type Resources struct {
@@ -66,12 +69,14 @@ type Resources struct {
 	buffer            []byte
 	sendBuffer        []byte
 	completionEntries int
+	cqTimeout         time.Duration
 }
 
 type ResourceOptions struct {
 	DeviceIndex   int
 	PortNum       uint8
 	MaxFrameBytes int
+	CQTimeout     time.Duration
 }
 
 type Endpoint struct {
@@ -99,6 +104,10 @@ func NewResourcesWithOptions(options ResourceOptions) (*Resources, error) {
 		return nil, ErrInvalidPort
 	}
 	limit := frameLimit(options.MaxFrameBytes)
+	cqTimeout := options.CQTimeout
+	if cqTimeout <= 0 {
+		cqTimeout = defaultCQTimeout
+	}
 	deviceList, count, err := getDeviceList()
 	if err != nil {
 		return nil, err
@@ -114,6 +123,7 @@ func NewResourcesWithOptions(options ResourceOptions) (*Resources, error) {
 		maxFrameBytes:     limit,
 		portNum:           options.PortNum,
 		completionEntries: 32,
+		cqTimeout:         cqTimeout,
 	}
 	if err := resources.open(device); err != nil {
 		_ = resources.Close()
@@ -272,12 +282,17 @@ func (r *Resources) PollCompletion() (int, error) {
 		return 0, ErrNoDevice
 	}
 	var wc C.struct_ibv_wc
-	for attempts := 0; attempts < 10000; attempts++ {
+	deadline := time.Now().Add(r.cqTimeout)
+	for {
 		n := C.ibv_poll_cq(r.completionQueue, 1, &wc)
 		if n < 0 {
 			return 0, fmt.Errorf("poll RDMA completion queue: %w", errnoError())
 		}
 		if n == 0 {
+			if !time.Now().Before(deadline) {
+				return 0, ErrCompletionTimeout
+			}
+			runtime.Gosched()
 			continue
 		}
 		if wc.status != C.IBV_WC_SUCCESS {
@@ -288,7 +303,6 @@ func (r *Resources) PollCompletion() (int, error) {
 		}
 		return 0, nil
 	}
-	return 0, fmt.Errorf("poll RDMA completion queue: timeout")
 }
 
 func DeviceCount() (int, error) {
