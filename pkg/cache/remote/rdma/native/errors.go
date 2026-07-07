@@ -23,4 +23,5 @@ import "errors"
 var (
 	ErrInvalidDeviceIndex = errors.New("invalid RDMA device index")
 	ErrNoDevice           = errors.New("RDMA device is not available")
+	ErrInvalidEndpoint    = errors.New("invalid RDMA endpoint")
 )

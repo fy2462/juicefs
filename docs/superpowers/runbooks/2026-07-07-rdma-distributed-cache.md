@@ -121,12 +121,12 @@ PATH=/usr/local/go/bin:$PATH go test -tags rdma ./pkg/cache/remote/rdma/...
 
 The `rdma` build tag now compiles the native transport boundary, a libibverbs
 resource lifecycle that opens devices and allocates PD/CQ/MR buffers when an
-RDMA device is available, creates an RC QP and local endpoint metadata, and a
-framed protocol server/client path. The data movement path is still the staged
-frame protocol used by the native smoke; the remaining production gap is
-exchanging endpoint metadata, moving QPs through RTR/RTS, and replacing the
-framed TCP transfer with real verbs send/receive operations and completion
-handling.
+RDMA device is available, creates an RC QP, exports local endpoint metadata, and
+can move QPs through INIT/RTR/RTS after endpoints are exchanged. The data
+movement path is still the staged frame protocol used by the native smoke; the
+remaining production gap is wiring endpoint exchange into client/server
+connections and replacing the framed TCP transfer with real verbs send/receive
+operations and completion handling.
 
 ## Native Smoke And Stress
 

@@ -48,6 +48,7 @@ type Resources struct {
 	maxFrameBytes     int
 	portNum           uint8
 	psn               uint32
+	connected         bool
 	context           *C.struct_ibv_context
 	protectionDomain  *C.struct_ibv_pd
 	completionQueue   *C.struct_ibv_cq
@@ -156,6 +157,29 @@ func (r *Resources) LocalEndpoint() (Endpoint, error) {
 	}, nil
 }
 
+func (r *Resources) Connect(remote Endpoint) error {
+	if err := validateEndpoint(remote); err != nil {
+		return err
+	}
+	if r == nil || r.queuePair == nil {
+		return ErrNoDevice
+	}
+	if r.connected {
+		return nil
+	}
+	if err := r.modifyToInit(); err != nil {
+		return err
+	}
+	if err := r.modifyToRTR(remote); err != nil {
+		return err
+	}
+	if err := r.modifyToRTS(); err != nil {
+		return err
+	}
+	r.connected = true
+	return nil
+}
+
 func DeviceCount() (int, error) {
 	deviceList, count, err := getDeviceList()
 	if err != nil {
@@ -215,6 +239,53 @@ func (r *Resources) createQueuePair() error {
 	return nil
 }
 
+func (r *Resources) modifyToInit() error {
+	var attr C.struct_ibv_qp_attr
+	attr.qp_state = C.IBV_QPS_INIT
+	attr.pkey_index = 0
+	attr.port_num = C.uint8_t(r.portNum)
+	attr.qp_access_flags = C.IBV_ACCESS_LOCAL_WRITE | C.IBV_ACCESS_REMOTE_READ | C.IBV_ACCESS_REMOTE_WRITE
+	mask := C.IBV_QP_STATE | C.IBV_QP_PKEY_INDEX | C.IBV_QP_PORT | C.IBV_QP_ACCESS_FLAGS
+	if rc := C.ibv_modify_qp(r.queuePair, &attr, C.int(mask)); rc != 0 {
+		return fmt.Errorf("modify RDMA queue pair to INIT: %w", errnoError())
+	}
+	return nil
+}
+
+func (r *Resources) modifyToRTR(remote Endpoint) error {
+	var attr C.struct_ibv_qp_attr
+	attr.qp_state = C.IBV_QPS_RTR
+	attr.path_mtu = C.IBV_MTU_1024
+	attr.dest_qp_num = C.uint32_t(remote.QPN)
+	attr.rq_psn = C.uint32_t(remote.PSN)
+	attr.max_dest_rd_atomic = 1
+	attr.min_rnr_timer = 12
+	attr.ah_attr.dlid = C.uint16_t(remote.LID)
+	attr.ah_attr.sl = 0
+	attr.ah_attr.src_path_bits = 0
+	attr.ah_attr.port_num = C.uint8_t(r.portNum)
+	mask := C.IBV_QP_STATE | C.IBV_QP_AV | C.IBV_QP_PATH_MTU | C.IBV_QP_DEST_QPN | C.IBV_QP_RQ_PSN | C.IBV_QP_MAX_DEST_RD_ATOMIC | C.IBV_QP_MIN_RNR_TIMER
+	if rc := C.ibv_modify_qp(r.queuePair, &attr, C.int(mask)); rc != 0 {
+		return fmt.Errorf("modify RDMA queue pair to RTR: %w", errnoError())
+	}
+	return nil
+}
+
+func (r *Resources) modifyToRTS() error {
+	var attr C.struct_ibv_qp_attr
+	attr.qp_state = C.IBV_QPS_RTS
+	attr.timeout = 14
+	attr.retry_cnt = 7
+	attr.rnr_retry = 7
+	attr.sq_psn = C.uint32_t(r.psn)
+	attr.max_rd_atomic = 1
+	mask := C.IBV_QP_STATE | C.IBV_QP_TIMEOUT | C.IBV_QP_RETRY_CNT | C.IBV_QP_RNR_RETRY | C.IBV_QP_SQ_PSN | C.IBV_QP_MAX_QP_RD_ATOMIC
+	if rc := C.ibv_modify_qp(r.queuePair, &attr, C.int(mask)); rc != 0 {
+		return fmt.Errorf("modify RDMA queue pair to RTS: %w", errnoError())
+	}
+	return nil
+}
+
 func getDeviceList() (**C.struct_ibv_device, int, error) {
 	var count C.int
 	deviceList := C.ibv_get_device_list(&count)
@@ -234,6 +305,13 @@ func randomPSN() (uint32, error) {
 		return 0, fmt.Errorf("generate RDMA packet sequence number: %w", err)
 	}
 	return binary.BigEndian.Uint32(data[:]) & 0xffffff, nil
+}
+
+func validateEndpoint(endpoint Endpoint) error {
+	if endpoint.QPN == 0 || endpoint.PSN == 0 || endpoint.RKey == 0 || endpoint.VAddr == 0 {
+		return ErrInvalidEndpoint
+	}
+	return nil
 }
 
 func frameLimit(value int) int {

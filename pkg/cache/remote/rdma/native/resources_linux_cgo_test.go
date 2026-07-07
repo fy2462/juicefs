@@ -83,3 +83,31 @@ func TestNewResourcesCreatesQueuePairAndEndpointWhenDeviceExists(t *testing.T) {
 	require.NotZero(t, endpoint.RKey)
 	require.NotZero(t, endpoint.VAddr)
 }
+
+func TestConnectRejectsInvalidEndpoint(t *testing.T) {
+	resources := &Resources{}
+
+	require.ErrorIs(t, resources.Connect(Endpoint{}), ErrInvalidEndpoint)
+}
+
+func TestConnectMovesQueuePairsToRTSWhenDeviceExists(t *testing.T) {
+	count, err := DeviceCount()
+	require.NoError(t, err)
+	if count == 0 {
+		t.Skip("no RDMA devices available")
+	}
+
+	left, err := NewResources(0, 128<<10)
+	require.NoError(t, err)
+	defer left.Close()
+	right, err := NewResources(0, 128<<10)
+	require.NoError(t, err)
+	defer right.Close()
+
+	leftEndpoint, err := left.LocalEndpoint()
+	require.NoError(t, err)
+	rightEndpoint, err := right.LocalEndpoint()
+	require.NoError(t, err)
+	require.NoError(t, left.Connect(rightEndpoint))
+	require.NoError(t, right.Connect(leftEndpoint))
+}
