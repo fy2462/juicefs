@@ -373,7 +373,7 @@ func serveNativeConnWithResourceFactory(ctx context.Context, conn net.Conn, serv
 		if err := serverNativeHandshake(ctx, conn, resources); err != nil {
 			return
 		}
-		_ = serveNativeResourceFrame(ctx, resources, server, maxFrameBytes)
+		serveNativeResourceFrames(ctx, resources, server, maxFrameBytes)
 		return
 	} else if !errors.Is(err, native.ErrNoDevice) {
 		return
@@ -405,6 +405,14 @@ func serveNativeConnWithResourceFactory(ctx context.Context, conn net.Conn, serv
 			return
 		}
 		if err := writeAll(conn, frame); err != nil {
+			return
+		}
+	}
+}
+
+func serveNativeResourceFrames(ctx context.Context, resources nativeResource, server *Server, maxFrameBytes int) {
+	for {
+		if err := serveNativeResourceFrame(ctx, resources, server, maxFrameBytes); err != nil {
 			return
 		}
 	}

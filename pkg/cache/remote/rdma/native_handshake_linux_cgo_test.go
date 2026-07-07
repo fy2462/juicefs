@@ -109,11 +109,7 @@ func TestServeNativeConnRunsEndpointHandshakeWhenResourcesExist(t *testing.T) {
 func TestServeNativeConnUsesResourceFrameExchange(t *testing.T) {
 	serverResource := newFakeNativeResource(2)
 	clientResource := newFakeNativeResource(1)
-	reqPayload, err := protocol.EncodeRequest(protocol.Request{Op: protocol.OpPing})
-	require.NoError(t, err)
-	reqFrame, err := encodeFrame(reqPayload, defaultRDMAFrameBytes)
-	require.NoError(t, err)
-	serverResource.queueReceived(reqFrame)
+	serverResource.queueReceived(encodedPingFrame(t))
 	clientConn, serverConn := net.Pipe()
 	defer clientConn.Close()
 	done := make(chan struct{})
@@ -124,15 +120,36 @@ func TestServeNativeConnUsesResourceFrameExchange(t *testing.T) {
 
 	require.NoError(t, clientNativeHandshake(context.Background(), clientConn, clientResource))
 	<-done
-	require.Equal(t, int32(1), serverResource.postRecvs.Load())
+	require.Equal(t, int32(2), serverResource.postRecvs.Load())
 	require.Equal(t, int32(1), serverResource.postSends.Load())
-	require.Equal(t, int32(2), serverResource.polls.Load())
+	require.Equal(t, int32(3), serverResource.polls.Load())
 	require.Len(t, serverResource.sentPayloads, 1)
 	respPayload, err := readPayloadFromEncodedFrame(serverResource.sentPayloads[0])
 	require.NoError(t, err)
 	resp, err := protocol.DecodeResponse(respPayload)
 	require.NoError(t, err)
 	require.Equal(t, protocol.StatusOK, resp.Status)
+}
+
+func TestServeNativeConnHandlesMultipleResourceFrames(t *testing.T) {
+	serverResource := newFakeNativeResource(2)
+	clientResource := newFakeNativeResource(1)
+	serverResource.queueReceived(encodedPingFrame(t))
+	serverResource.queueReceived(encodedPingFrame(t))
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		serveNativeConnWithResourceFactory(context.Background(), serverConn, NewServer(mock.NewClient()), defaultRDMAFrameBytes, fakeNativeResourceFactory{resource: serverResource})
+	}()
+
+	require.NoError(t, clientNativeHandshake(context.Background(), clientConn, clientResource))
+	<-done
+	require.Equal(t, int32(3), serverResource.postRecvs.Load())
+	require.Equal(t, int32(2), serverResource.postSends.Load())
+	require.Equal(t, int32(5), serverResource.polls.Load())
+	require.Len(t, serverResource.sentPayloads, 2)
 }
 
 func TestNativeConnRoundTripUsesResourceFrameExchange(t *testing.T) {
@@ -214,7 +231,7 @@ func (r *fakeNativeResource) PostRecv() error {
 
 func (r *fakeNativeResource) PostSend(payload []byte) error {
 	r.postSends.Add(1)
-	r.recvSizes = append(r.recvSizes, 0)
+	r.recvSizes = append([]int{0}, r.recvSizes...)
 	data := make([]byte, len(payload))
 	copy(data, payload)
 	r.sentPayloads = append(r.sentPayloads, data)
@@ -251,6 +268,15 @@ func (f fakeNativeResourceFactory) New(deviceIndex, maxFrameBytes int) (nativeRe
 func readPayloadFromEncodedFrame(frame []byte) ([]byte, error) {
 	conn := bytesConn{data: frame}
 	return readFrame(&conn, defaultRDMAFrameBytes)
+}
+
+func encodedPingFrame(t *testing.T) []byte {
+	t.Helper()
+	reqPayload, err := protocol.EncodeRequest(protocol.Request{Op: protocol.OpPing})
+	require.NoError(t, err)
+	reqFrame, err := encodeFrame(reqPayload, defaultRDMAFrameBytes)
+	require.NoError(t, err)
+	return reqFrame
 }
 
 type bytesConn struct {

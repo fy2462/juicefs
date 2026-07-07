@@ -128,10 +128,10 @@ QPs through INIT/RTR/RTS. The native package also has minimal verbs
 test that runs when an ibverbs/open-rdma device exists. The data movement path
 has a resource-backed frame exchange path on both client and server when native
 resources exist. The default native smoke can still fall back to the staged TCP
-frame path when no RDMA device exists; the remaining production gap is making
-the server resource path a full connection loop and adding a strict native smoke
-that sets `JFS_RDMA_REQUIRE_DEVICE=true` to prove payloads travel through verbs
-instead of TCP fallback.
+frame path when no RDMA device exists; the remaining production gap is adding a
+strict native smoke that sets `JFS_RDMA_REQUIRE_DEVICE=true` to prove payloads
+travel through verbs instead of TCP fallback, then removing the fallback from
+strict native deployments.
 
 ## Native Smoke And Stress
 
