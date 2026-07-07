@@ -93,6 +93,10 @@ func ListenAndServe(ctx context.Context, options ServeOptions) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	nativeOptions, err := nativeOptionsFromEnv()
+	if err != nil {
+		return err
+	}
 	listener, err := net.Listen("tcp", options.Listen)
 	if err != nil {
 		return err
@@ -119,7 +123,7 @@ func ListenAndServe(ctx context.Context, options ServeOptions) error {
 			}
 			return err
 		}
-		go serveNativeConn(ctx, conn, server, maxFrame)
+		go serveNativeConnWithResourceFactory(ctx, conn, server, maxFrame, nativeOptions.resourceFactory, nativeOptions.requireDevice)
 	}
 }
 
@@ -362,10 +366,10 @@ func writeHandshakeFrame(ctx context.Context, conn net.Conn, payload []byte) err
 }
 
 func serveNativeConn(ctx context.Context, conn net.Conn, server *Server, maxFrameBytes int) {
-	serveNativeConnWithResourceFactory(ctx, conn, server, maxFrameBytes, ibverbsResourceFactory{})
+	serveNativeConnWithResourceFactory(ctx, conn, server, maxFrameBytes, ibverbsResourceFactory{}, false)
 }
 
-func serveNativeConnWithResourceFactory(ctx context.Context, conn net.Conn, server *Server, maxFrameBytes int, resourceFactory nativeResourceFactory) {
+func serveNativeConnWithResourceFactory(ctx context.Context, conn net.Conn, server *Server, maxFrameBytes int, resourceFactory nativeResourceFactory, requireDevice bool) {
 	defer conn.Close()
 	resources, err := resourceFactory.New(0, maxFrameBytes)
 	if err == nil {
@@ -375,7 +379,7 @@ func serveNativeConnWithResourceFactory(ctx context.Context, conn net.Conn, serv
 		}
 		serveNativeResourceFrames(ctx, resources, server, maxFrameBytes)
 		return
-	} else if !errors.Is(err, native.ErrNoDevice) {
+	} else if requireDevice || !errors.Is(err, native.ErrNoDevice) {
 		return
 	}
 	done := make(chan struct{})

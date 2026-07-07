@@ -129,9 +129,10 @@ test that runs when an ibverbs/open-rdma device exists. The data movement path
 has a resource-backed frame exchange path on both client and server when native
 resources exist. The default native smoke can still fall back to the staged TCP
 frame path when no RDMA device exists. The strict native smoke sets
-`JFS_RDMA_REQUIRE_DEVICE=true`; on a host with an ibverbs/open-rdma device, this
-proves payloads travel through verbs instead of TCP fallback. On a host without
-such a device, it prints a clear SKIP.
+`JFS_RDMA_REQUIRE_DEVICE=true` for both client and `rdma-cache-server`; on a host
+with an ibverbs/open-rdma device, this proves payloads travel through verbs
+instead of TCP fallback. On a host without such a device, it prints a clear SKIP
+before starting the server.
 
 ## Native Smoke And Stress
 
