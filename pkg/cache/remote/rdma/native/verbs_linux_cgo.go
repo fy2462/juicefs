@@ -64,6 +64,7 @@ type Resources struct {
 	memoryRegion      *C.struct_ibv_mr
 	bufferPtr         unsafe.Pointer
 	buffer            []byte
+	sendBuffer        []byte
 	completionEntries int
 }
 
@@ -125,6 +126,7 @@ func (r *Resources) Close() error {
 		C.free(r.bufferPtr)
 		r.bufferPtr = nil
 		r.buffer = nil
+		r.sendBuffer = nil
 	}
 	if r.completionQueue != nil {
 		if rc := C.ibv_destroy_cq(r.completionQueue); rc != 0 {
@@ -215,15 +217,17 @@ func (r *Resources) PostRecv() error {
 }
 
 func (r *Resources) PostSend(payload []byte) error {
-	if r != nil && len(payload) > len(r.buffer) {
+	if r != nil && len(payload) > r.sendBufferLimit() {
 		return ErrFrameTooLarge
 	}
-	if r == nil || r.queuePair == nil || r.memoryRegion == nil || len(r.buffer) == 0 {
+	if r != nil && len(r.sendBuffer) > 0 {
+		copy(r.sendBuffer, payload)
+	}
+	if r == nil || r.queuePair == nil || r.memoryRegion == nil || len(r.sendBuffer) == 0 {
 		return ErrNoDevice
 	}
-	copy(r.buffer, payload)
 	var sge C.struct_ibv_sge
-	sge.addr = C.uint64_t(uintptr(r.bufferPtr))
+	sge.addr = C.uint64_t(uintptr(unsafe.Pointer(&r.sendBuffer[0])))
 	sge.length = C.uint32_t(len(payload))
 	sge.lkey = r.memoryRegion.lkey
 	var wr C.struct_ibv_send_wr
@@ -237,6 +241,13 @@ func (r *Resources) PostSend(payload []byte) error {
 		return fmt.Errorf("post RDMA send: %w", errnoError())
 	}
 	return nil
+}
+
+func (r *Resources) sendBufferLimit() int {
+	if len(r.sendBuffer) > 0 {
+		return len(r.sendBuffer)
+	}
+	return len(r.buffer)
 }
 
 func (r *Resources) PollCompletion() (int, error) {
@@ -285,13 +296,16 @@ func (r *Resources) open(device *C.struct_ibv_device) error {
 	if r.completionQueue == nil {
 		return fmt.Errorf("create RDMA completion queue: %w", errnoError())
 	}
-	r.bufferPtr = C.calloc(C.size_t(r.maxFrameBytes), 1)
+	regionBytes := r.maxFrameBytes * 2
+	r.bufferPtr = C.calloc(C.size_t(regionBytes), 1)
 	if r.bufferPtr == nil {
 		return fmt.Errorf("allocate RDMA frame buffer: %w", errnoError())
 	}
-	r.buffer = unsafe.Slice((*byte)(r.bufferPtr), r.maxFrameBytes)
+	region := unsafe.Slice((*byte)(r.bufferPtr), regionBytes)
+	r.buffer = region[:r.maxFrameBytes]
+	r.sendBuffer = region[r.maxFrameBytes:]
 	access := C.IBV_ACCESS_LOCAL_WRITE | C.IBV_ACCESS_REMOTE_READ | C.IBV_ACCESS_REMOTE_WRITE
-	r.memoryRegion = C.ibv_reg_mr(r.protectionDomain, r.bufferPtr, C.size_t(r.maxFrameBytes), C.int(access))
+	r.memoryRegion = C.ibv_reg_mr(r.protectionDomain, r.bufferPtr, C.size_t(regionBytes), C.int(access))
 	if r.memoryRegion == nil {
 		return fmt.Errorf("register RDMA memory region: %w", errnoError())
 	}

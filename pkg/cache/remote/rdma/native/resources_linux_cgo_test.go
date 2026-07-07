@@ -59,7 +59,9 @@ func TestNewResourcesAllocatesVerbsObjectsWhenDeviceExists(t *testing.T) {
 	require.NotNil(t, resources.completionQueue)
 	require.NotNil(t, resources.memoryRegion)
 	require.NotNil(t, resources.buffer)
+	require.NotNil(t, resources.sendBuffer)
 	require.Len(t, resources.buffer, 128<<10)
+	require.Len(t, resources.sendBuffer, 128<<10)
 	require.NoError(t, resources.Close())
 	require.NoError(t, resources.Close())
 }
@@ -116,6 +118,18 @@ func TestSendRejectsOversizedPayload(t *testing.T) {
 	resources := &Resources{buffer: make([]byte, 4), maxFrameBytes: 4}
 
 	require.ErrorIs(t, resources.PostSend([]byte("too-large")), ErrFrameTooLarge)
+}
+
+func TestPostSendDoesNotOverwriteReceiveBuffer(t *testing.T) {
+	resources := &Resources{
+		buffer:        []byte("recv-data"),
+		sendBuffer:    make([]byte, 16),
+		maxFrameBytes: 16,
+	}
+
+	require.ErrorIs(t, resources.PostSend([]byte("send-data")), ErrNoDevice)
+	require.Equal(t, []byte("recv-data"), resources.Buffer())
+	require.Equal(t, []byte("send-data"), resources.sendBuffer[:len("send-data")])
 }
 
 func TestSendReceiveCompletesWhenDeviceExists(t *testing.T) {
