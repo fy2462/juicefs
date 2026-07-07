@@ -19,6 +19,12 @@ CI hardware-independent.
 Options:
   --strict-device   Require an ibverbs/open-rdma device and force payloads
                     through native RDMA resources with JFS_RDMA_REQUIRE_DEVICE.
+
+Environment:
+  JFS_RDMA_SMOKE_OPS          Total put/get/delete iterations. Default: 1.
+  JFS_RDMA_SMOKE_CONCURRENCY  Concurrent workers. Default: 1.
+  JFS_RDMA_BIN                Reuse an existing rdma-tagged juicefs binary.
+  JFS_RDMA_SMOKE_REPORT       Optional path for a JSON performance summary.
 EOF
 }
 
@@ -127,6 +133,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -167,7 +174,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Printf("completed %d rdma native cache operations with concurrency %d in %s\n", ops, concurrency, time.Since(start).Round(time.Millisecond))
+	duration := time.Since(start)
+	if err := writeReport(ops, concurrency, duration); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Printf("completed %d rdma native cache operations with concurrency %d in %s\n", ops, concurrency, duration.Round(time.Millisecond))
 }
 
 func waitForServer(addr string) error {
@@ -214,6 +226,40 @@ func runWorkload(addr string, ops, concurrency int) error {
 			return err
 		}
 	}
+	return nil
+}
+
+type smokeReport struct {
+	Ops          int     `json:"ops"`
+	Concurrency  int     `json:"concurrency"`
+	DurationMS   int64   `json:"duration_ms"`
+	OpsPerSecond float64 `json:"ops_per_second"`
+}
+
+func writeReport(ops, concurrency int, duration time.Duration) error {
+	path := os.Getenv("JFS_RDMA_SMOKE_REPORT")
+	if path == "" {
+		return nil
+	}
+	opsPerSecond := 0.0
+	if duration > 0 {
+		opsPerSecond = float64(ops) / duration.Seconds()
+	}
+	report := smokeReport{
+		Ops:          ops,
+		Concurrency:  concurrency,
+		DurationMS:   duration.Milliseconds(),
+		OpsPerSecond: opsPerSecond,
+	}
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode RDMA smoke report: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("write RDMA smoke report %s: %w", path, err)
+	}
+	fmt.Printf("wrote rdma native smoke report to %s\n", path)
 	return nil
 }
 

@@ -119,13 +119,23 @@ jobs:
 
       - name: Run native RDMA smoke
         run: |
-          make test.rdma-native-smoke
+          JFS_RDMA_SMOKE_REPORT=rdma-native-smoke-report.json make test.rdma-native-smoke
 
       - name: Run strict native RDMA smoke
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.strict-native == 'true'
         run: |
           make test.rdma-native-strict
-          JFS_RDMA_STRESS_OPS=100 JFS_RDMA_STRESS_CONCURRENCY=4 make test.rdma-native-strict-stress
+          JFS_RDMA_SMOKE_REPORT=rdma-native-strict-stress-report.json JFS_RDMA_STRESS_OPS=100 JFS_RDMA_STRESS_CONCURRENCY=4 make test.rdma-native-strict-stress
+
+      - name: Upload native RDMA smoke reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdma-native-smoke-reports
+          path: |
+            rdma-native-smoke-report.json
+            rdma-native-strict-stress-report.json
+          if-no-files-found: ignore
 
       - name: Setup upterm session
         if: failure() && (github.event.inputs.debug == 'true' || github.run_attempt != 1)
