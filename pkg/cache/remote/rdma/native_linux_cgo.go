@@ -39,6 +39,7 @@ const nativeHandshakeFrameBytes = 64 << 10
 
 type nativeOptions struct {
 	deviceIndex     int
+	portNum         uint8
 	maxFrameBytes   int
 	cqTimeout       time.Duration
 	requireDevice   bool
@@ -76,7 +77,7 @@ type nativeResource interface {
 }
 
 type nativeResourceFactory interface {
-	New(deviceIndex, maxFrameBytes int) (nativeResource, error)
+	New(deviceIndex int, portNum uint8, maxFrameBytes int) (nativeResource, error)
 }
 
 type ibverbsResourceFactory struct{}
@@ -123,12 +124,16 @@ func ListenAndServe(ctx context.Context, options ServeOptions) error {
 			}
 			return err
 		}
-		go serveNativeConnWithResourceFactory(ctx, conn, server, maxFrame, nativeOptions.resourceFactory, nativeOptions.requireDevice, nativeOptions.deviceIndex)
+		go serveNativeConnWithResourceFactory(ctx, conn, server, maxFrame, nativeOptions.resourceFactory, nativeOptions.requireDevice, nativeOptions.deviceIndex, nativeOptions.portNum)
 	}
 }
 
 func nativeOptionsFromEnv() (nativeOptions, error) {
 	deviceIndex, err := parseEnvInt("JFS_RDMA_DEVICE_INDEX", 0)
+	if err != nil {
+		return nativeOptions{}, err
+	}
+	portNum, err := parseEnvUint8("JFS_RDMA_PORT_NUM", 1)
 	if err != nil {
 		return nativeOptions{}, err
 	}
@@ -146,6 +151,7 @@ func nativeOptionsFromEnv() (nativeOptions, error) {
 	}
 	return nativeOptions{
 		deviceIndex:     deviceIndex,
+		portNum:         portNum,
 		maxFrameBytes:   maxFrameBytes(maxFrame),
 		cqTimeout:       cqTimeout,
 		requireDevice:   requireDevice,
@@ -163,6 +169,21 @@ func parseEnvInt(name string, defaultValue int) (int, error) {
 		return 0, fmt.Errorf("%s: %w", name, err)
 	}
 	return parsed, nil
+}
+
+func parseEnvUint8(name string, defaultValue uint8) (uint8, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return defaultValue, nil
+	}
+	parsed, err := strconv.ParseUint(value, 10, 8)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", name, err)
+	}
+	if parsed == 0 {
+		return 0, fmt.Errorf("%s: RDMA port number must be greater than 0", name)
+	}
+	return uint8(parsed), nil
 }
 
 func parseEnvDuration(name string, defaultValue time.Duration) (time.Duration, error) {
@@ -194,7 +215,11 @@ func (d *nativeDialer) Dial(ctx context.Context, node string, options Options) (
 	if resourceFactory == nil {
 		resourceFactory = ibverbsResourceFactory{}
 	}
-	resources, err := resourceFactory.New(d.options.deviceIndex, d.options.maxFrameBytes)
+	portNum := d.options.portNum
+	if portNum == 0 {
+		portNum = 1
+	}
+	resources, err := resourceFactory.New(d.options.deviceIndex, portNum, d.options.maxFrameBytes)
 	if err != nil {
 		if d.options.requireDevice || !errors.Is(err, native.ErrNoDevice) {
 			return nil, err
@@ -366,12 +391,15 @@ func writeHandshakeFrame(ctx context.Context, conn net.Conn, payload []byte) err
 }
 
 func serveNativeConn(ctx context.Context, conn net.Conn, server *Server, maxFrameBytes int) {
-	serveNativeConnWithResourceFactory(ctx, conn, server, maxFrameBytes, ibverbsResourceFactory{}, false, 0)
+	serveNativeConnWithResourceFactory(ctx, conn, server, maxFrameBytes, ibverbsResourceFactory{}, false, 0, 1)
 }
 
-func serveNativeConnWithResourceFactory(ctx context.Context, conn net.Conn, server *Server, maxFrameBytes int, resourceFactory nativeResourceFactory, requireDevice bool, deviceIndex int) {
+func serveNativeConnWithResourceFactory(ctx context.Context, conn net.Conn, server *Server, maxFrameBytes int, resourceFactory nativeResourceFactory, requireDevice bool, deviceIndex int, portNum uint8) {
 	defer conn.Close()
-	resources, err := resourceFactory.New(deviceIndex, maxFrameBytes)
+	if portNum == 0 {
+		portNum = 1
+	}
+	resources, err := resourceFactory.New(deviceIndex, portNum, maxFrameBytes)
 	if err == nil {
 		defer resources.Close()
 		if err := serverNativeHandshake(ctx, conn, resources); err != nil {
@@ -452,8 +480,12 @@ func serveNativeResourceFrame(ctx context.Context, resources nativeResource, ser
 	return err
 }
 
-func (ibverbsResourceFactory) New(deviceIndex, maxFrameBytes int) (nativeResource, error) {
-	resources, err := native.NewResources(deviceIndex, maxFrameBytes)
+func (ibverbsResourceFactory) New(deviceIndex int, portNum uint8, maxFrameBytes int) (nativeResource, error) {
+	resources, err := native.NewResourcesWithOptions(native.ResourceOptions{
+		DeviceIndex:   deviceIndex,
+		PortNum:       portNum,
+		MaxFrameBytes: maxFrameBytes,
+	})
 	if resources == nil {
 		return nil, err
 	}

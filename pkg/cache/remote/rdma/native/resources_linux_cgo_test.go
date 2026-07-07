@@ -44,6 +44,17 @@ func TestNewResourcesRejectsUnavailableDeviceIndex(t *testing.T) {
 	require.ErrorIs(t, err, ErrNoDevice)
 }
 
+func TestNewResourcesWithOptionsRejectsZeroPort(t *testing.T) {
+	resources, err := NewResourcesWithOptions(ResourceOptions{
+		DeviceIndex:   0,
+		PortNum:       0,
+		MaxFrameBytes: 0,
+	})
+
+	require.Nil(t, resources)
+	require.ErrorIs(t, err, ErrInvalidPort)
+}
+
 func TestNewResourcesAllocatesVerbsObjectsWhenDeviceExists(t *testing.T) {
 	count, err := DeviceCount()
 	require.NoError(t, err)
@@ -60,6 +71,7 @@ func TestNewResourcesAllocatesVerbsObjectsWhenDeviceExists(t *testing.T) {
 	require.NotNil(t, resources.memoryRegion)
 	require.NotNil(t, resources.buffer)
 	require.NotNil(t, resources.sendBuffer)
+	require.Equal(t, uint8(1), resources.portNum)
 	require.Len(t, resources.buffer, 128<<10)
 	require.Len(t, resources.sendBuffer, 128<<10)
 	require.NoError(t, resources.Close())

@@ -68,6 +68,12 @@ type Resources struct {
 	completionEntries int
 }
 
+type ResourceOptions struct {
+	DeviceIndex   int
+	PortNum       uint8
+	MaxFrameBytes int
+}
+
 type Endpoint struct {
 	LID   uint16
 	QPN   uint32
@@ -78,24 +84,35 @@ type Endpoint struct {
 }
 
 func NewResources(deviceIndex, maxFrameBytes int) (*Resources, error) {
-	if deviceIndex < 0 {
+	return NewResourcesWithOptions(ResourceOptions{
+		DeviceIndex:   deviceIndex,
+		PortNum:       1,
+		MaxFrameBytes: maxFrameBytes,
+	})
+}
+
+func NewResourcesWithOptions(options ResourceOptions) (*Resources, error) {
+	if options.DeviceIndex < 0 {
 		return nil, ErrInvalidDeviceIndex
 	}
-	limit := frameLimit(maxFrameBytes)
+	if options.PortNum == 0 {
+		return nil, ErrInvalidPort
+	}
+	limit := frameLimit(options.MaxFrameBytes)
 	deviceList, count, err := getDeviceList()
 	if err != nil {
 		return nil, err
 	}
 	defer C.ibv_free_device_list(deviceList)
-	if count == 0 || deviceIndex >= count {
+	if count == 0 || options.DeviceIndex >= count {
 		return nil, ErrNoDevice
 	}
 
-	device := *(**C.struct_ibv_device)(unsafe.Pointer(uintptr(unsafe.Pointer(deviceList)) + uintptr(deviceIndex)*unsafe.Sizeof(uintptr(0))))
+	device := *(**C.struct_ibv_device)(unsafe.Pointer(uintptr(unsafe.Pointer(deviceList)) + uintptr(options.DeviceIndex)*unsafe.Sizeof(uintptr(0))))
 	resources := &Resources{
-		deviceIndex:       deviceIndex,
+		deviceIndex:       options.DeviceIndex,
 		maxFrameBytes:     limit,
-		portNum:           1,
+		portNum:           options.PortNum,
 		completionEntries: 32,
 	}
 	if err := resources.open(device); err != nil {

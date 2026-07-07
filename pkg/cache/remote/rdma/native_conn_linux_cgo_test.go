@@ -91,6 +91,7 @@ func TestNativeDialerRoundTripPing(t *testing.T) {
 
 func TestNativeOptionsFromEnv(t *testing.T) {
 	t.Setenv("JFS_RDMA_DEVICE_INDEX", "2")
+	t.Setenv("JFS_RDMA_PORT_NUM", "3")
 	t.Setenv("JFS_RDMA_MAX_FRAME_BYTES", "131072")
 	t.Setenv("JFS_RDMA_CQ_TIMEOUT", "25ms")
 	t.Setenv("JFS_RDMA_REQUIRE_DEVICE", "true")
@@ -98,6 +99,7 @@ func TestNativeOptionsFromEnv(t *testing.T) {
 	options, err := nativeOptionsFromEnv()
 	require.NoError(t, err)
 	require.Equal(t, 2, options.deviceIndex)
+	require.Equal(t, uint8(3), options.portNum)
 	require.Equal(t, 131072, options.maxFrameBytes)
 	require.Equal(t, 25*time.Millisecond, options.cqTimeout)
 	require.True(t, options.requireDevice)
