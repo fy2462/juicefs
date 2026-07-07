@@ -20,7 +20,9 @@ package rdma
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -53,6 +55,40 @@ func newNativeDialerFromEnv() Dialer {
 		return errorDialer{err: err}
 	}
 	return &nativeDialer{options: options}
+}
+
+func ListenAndServe(ctx context.Context, options ServeOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	listener, err := net.Listen("tcp", options.Listen)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = listener.Close()
+		case <-done:
+		}
+	}()
+
+	server := NewServer(options.Backend)
+	maxFrame := maxFrameBytes(options.MaxFrameBytes)
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			return err
+		}
+		go serveNativeConn(ctx, conn, server, maxFrame)
+	}
 }
 
 func nativeOptionsFromEnv() (nativeOptions, error) {
@@ -140,6 +176,54 @@ func (c *nativeConn) RoundTrip(ctx context.Context, req protocol.Request) (proto
 
 func (c *nativeConn) Close() error {
 	return c.conn.Close()
+}
+
+func serveNativeConn(ctx context.Context, conn net.Conn, server *Server, maxFrameBytes int) {
+	defer conn.Close()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+
+	for {
+		reqFrame, err := readFrame(conn, maxFrameBytes)
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return
+			}
+			return
+		}
+		respFrame, err := server.HandleFrame(ctx, reqFrame)
+		if err != nil {
+			return
+		}
+		frame, err := encodeFrame(respFrame, maxFrameBytes)
+		if err != nil {
+			return
+		}
+		if err := writeAll(conn, frame); err != nil {
+			return
+		}
+	}
+}
+
+func writeAll(conn net.Conn, data []byte) error {
+	for len(data) > 0 {
+		n, err := conn.Write(data)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+	}
+	return nil
 }
 
 type errorDialer struct {

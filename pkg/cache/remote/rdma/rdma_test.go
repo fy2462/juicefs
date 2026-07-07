@@ -55,6 +55,9 @@ func TestCapabilityDefaultBuild(t *testing.T) {
 }
 
 func TestListenAndServeDefaultBuildUnsupported(t *testing.T) {
+	if Capability().Built {
+		t.Skip("default unsupported server behavior only applies without the rdma build tag")
+	}
 	err := ListenAndServe(context.Background(), ServeOptions{
 		Listen:  "127.0.0.1:0",
 		Backend: mock.NewClient(),

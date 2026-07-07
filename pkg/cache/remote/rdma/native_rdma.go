@@ -19,7 +19,6 @@
 package rdma
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,13 +31,6 @@ func NewClient(options Options) remote.Client {
 		options.Dialer = newNativeDialerFromEnv()
 	}
 	return newClient(options)
-}
-
-func ListenAndServe(ctx context.Context, options ServeOptions) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return ErrUnsupported
 }
 
 func Capability() CapabilityInfo {

@@ -71,20 +71,13 @@ func rdmaCacheServer(c *cli.Context) error {
 		return err
 	}
 	defer backend.Close()
-	handler, err := newRDMACacheServerHandler(c.String("transport"), backend)
-	if err != nil {
-		return err
-	}
 	logger.Infof("starting rdma-cache-server on %s with cache-size %s", listen, c.String("cache-size"))
 
-	srv := &http.Server{
-		Addr:              listen,
-		Handler:           handler,
-		ReadHeaderTimeout: time.Second * 5,
-	}
+	ctx, cancel := context.WithCancel(c.Context)
+	defer cancel()
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- srv.ListenAndServe()
+		errCh <- runRDMACacheServer(ctx, listen, c.String("transport"), backend)
 	}()
 
 	sigCh := make(chan os.Signal, 1)
@@ -94,9 +87,53 @@ func rdmaCacheServer(c *cli.Context) error {
 	select {
 	case sig := <-sigCh:
 		logger.Infof("stopping rdma-cache-server after %s", sig)
-		ctx, cancel := context.WithTimeout(c.Context, time.Second*10)
+		cancel()
+		return <-errCh
+	case err := <-errCh:
+		return err
+	}
+}
+
+func runRDMACacheServer(ctx context.Context, listen, transport string, backend remote.Client) error {
+	switch transport {
+	case "", "http":
+		return runRDMACacheHTTPServer(ctx, listen, backend)
+	case "rdma":
+		return rdma.ListenAndServe(ctx, rdma.ServeOptions{
+			Listen:  listen,
+			Backend: backend,
+		})
+	default:
+		return fmt.Errorf("unknown rdma-cache-server transport %q", transport)
+	}
+}
+
+func runRDMACacheHTTPServer(ctx context.Context, listen string, backend remote.Client) error {
+	handler, err := newRDMACacheServerHandler("http", backend)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{
+		Addr:              listen,
+		Handler:           handler,
+		ReadHeaderTimeout: time.Second * 5,
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.ListenAndServe()
+	}()
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 		defer cancel()
-		return srv.Shutdown(ctx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		err := <-errCh
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
 	case err := <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
