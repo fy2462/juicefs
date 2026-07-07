@@ -194,6 +194,14 @@ OPEN_RDMA_DRIVER=/media/psf/Home/github/PFS/open-rdma-driver \
 make test.rdma-native-mounted-mock
 ```
 
+Run mounted native RDMA L2 failover with two L2 nodes, single-node L2 failure,
+all-L2-down L1+L3 fallback, and L2+L3-down failure:
+
+```sh
+OPEN_RDMA_DRIVER=/media/psf/Home/github/PFS/open-rdma-driver \
+make test.rdma-native-mounted-failover-mock
+```
+
 Run the same mock-backed path through the stress harness entrypoint:
 
 ```sh
