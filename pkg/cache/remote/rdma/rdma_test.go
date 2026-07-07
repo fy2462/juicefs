@@ -19,6 +19,7 @@ package rdma
 import (
 	"context"
 	"io"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -73,6 +74,16 @@ func TestServerHandleFrameUsesProtocolExecutor(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, protocol.StatusOK, resp.Status)
 	require.Equal(t, []byte("data"), resp.Payload)
+}
+
+func TestServerHandleFramePing(t *testing.T) {
+	req, err := protocol.EncodeRequest(protocol.Request{Op: protocol.OpPing})
+	require.NoError(t, err)
+	frame, err := NewServer(mock.NewClient()).HandleFrame(context.Background(), req)
+	require.NoError(t, err)
+	resp, err := protocol.DecodeResponse(frame)
+	require.NoError(t, err)
+	require.Equal(t, protocol.StatusOK, resp.Status)
 }
 
 func TestServerHandleFrameBadRequest(t *testing.T) {
@@ -162,6 +173,36 @@ func TestClientSkipsFailedNodeAndUsesHealthyReplica(t *testing.T) {
 	require.NoError(t, client.Close())
 }
 
+func TestClientActiveProbeRecoversNodeDuringCooldown(t *testing.T) {
+	backend := mock.NewClient()
+	require.NoError(t, backend.Put(context.Background(), "k", []byte("value")))
+	dialer := &dynamicDialer{}
+	client := NewClient(Options{
+		Nodes:         []string{"node-a"},
+		Timeout:       50 * time.Millisecond,
+		FailThreshold: 1,
+		NodeCooldown:  time.Hour,
+		ProbeInterval: 10 * time.Millisecond,
+		ProbeTimeout:  10 * time.Millisecond,
+		Dialer:        dialer,
+	})
+	defer client.Close()
+
+	_, err := client.Get(context.Background(), "k", 0, -1)
+	require.ErrorIs(t, err, remote.ErrUnavailable)
+
+	dialer.SetServer(NewServer(backend))
+	require.Eventually(t, func() bool {
+		r, err := client.Get(context.Background(), "k", 0, -1)
+		if err != nil {
+			return false
+		}
+		defer r.Close()
+		data, err := io.ReadAll(r)
+		return err == nil && string(data) == "value"
+	}, time.Second, 10*time.Millisecond)
+}
+
 type memoryDialer struct {
 	server *Server
 }
@@ -204,4 +245,24 @@ func (c memoryConn) RoundTrip(ctx context.Context, req protocol.Request) (protoc
 
 func (c memoryConn) Close() error {
 	return nil
+}
+
+type dynamicDialer struct {
+	mu     sync.Mutex
+	server *Server
+}
+
+func (d *dynamicDialer) SetServer(server *Server) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.server = server
+}
+
+func (d *dynamicDialer) Dial(ctx context.Context, node string, options Options) (Conn, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.server == nil {
+		return nil, remote.ErrUnavailable
+	}
+	return memoryConn{server: d.server}, nil
 }

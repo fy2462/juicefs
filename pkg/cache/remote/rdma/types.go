@@ -59,12 +59,16 @@ type Dialer interface {
 }
 
 type Client struct {
-	options   Options
-	placement *cluster.Placement
-	health    *cluster.Health
-	mu        sync.Mutex
-	conns     map[string]Conn
-	closed    bool
+	options      Options
+	placement    *cluster.Placement
+	health       *cluster.Health
+	mu           sync.Mutex
+	conns        map[string]Conn
+	closed       bool
+	closeOnce    sync.Once
+	stopCh       chan struct{}
+	wg           sync.WaitGroup
+	probeTimeout time.Duration
 }
 
 type unsupportedDialer struct{}
@@ -73,7 +77,7 @@ func newClient(options Options) *Client {
 	if options.Dialer == nil {
 		options.Dialer = unsupportedDialer{}
 	}
-	return &Client{
+	client := &Client{
 		options:   options,
 		placement: cluster.NewPlacement(options.Nodes, options.Replicas),
 		health: cluster.NewHealth(cluster.Options{
@@ -81,8 +85,14 @@ func newClient(options Options) *Client {
 			Cooldown:      options.NodeCooldown,
 			Observer:      options.Observer,
 		}),
-		conns: make(map[string]Conn),
+		conns:        make(map[string]Conn),
+		stopCh:       make(chan struct{}),
+		probeTimeout: remoteCacheProbeTimeout(options.ProbeTimeout, options.Timeout),
 	}
+	if options.ProbeInterval > 0 {
+		client.startProber(options.ProbeInterval)
+	}
+	return client
 }
 
 func (unsupportedDialer) Dial(ctx context.Context, node string, options Options) (Conn, error) {
@@ -124,15 +134,19 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 }
 
 func (c *Client) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.closed = true
 	var err error
-	for _, conn := range c.conns {
-		if e := conn.Close(); e != nil && err == nil {
-			err = e
+	c.closeOnce.Do(func() {
+		close(c.stopCh)
+		c.wg.Wait()
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.closed = true
+		for _, conn := range c.conns {
+			if e := conn.Close(); e != nil && err == nil {
+				err = e
+			}
 		}
-	}
+	})
 	return err
 }
 
@@ -156,6 +170,7 @@ func (c *Client) roundTrip(ctx context.Context, req protocol.Request) (protocol.
 		}
 		resp, err := conn.RoundTrip(ctx, req)
 		if err != nil {
+			c.dropConnection(node)
 			c.health.MarkFailure(node)
 			continue
 		}
@@ -182,6 +197,45 @@ func (c *Client) roundTrip(ctx context.Context, req protocol.Request) (protocol.
 	return protocol.Response{}, remote.ErrUnavailable
 }
 
+func (c *Client) startProber(interval time.Duration) {
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				c.probeUnhealthy()
+			case <-c.stopCh:
+				return
+			}
+		}
+	}()
+}
+
+func (c *Client) probeUnhealthy() {
+	for _, node := range c.health.Unhealthy(c.options.Nodes) {
+		ctx, cancel := context.WithTimeout(context.Background(), c.probeTimeout)
+		ok := c.probeNode(ctx, node)
+		cancel()
+		c.health.MarkProbe(node, ok)
+	}
+}
+
+func (c *Client) probeNode(ctx context.Context, node string) bool {
+	conn, err := c.connection(ctx, node)
+	if err != nil {
+		return false
+	}
+	resp, err := conn.RoundTrip(ctx, protocol.Request{Op: protocol.OpPing})
+	if err != nil {
+		c.dropConnection(node)
+		return false
+	}
+	return resp.Status == protocol.StatusOK
+}
+
 func protocolOpName(op protocol.Op) string {
 	switch op {
 	case protocol.OpGet:
@@ -190,9 +244,21 @@ func protocolOpName(op protocol.Op) string {
 		return "put"
 	case protocol.OpDelete:
 		return "delete"
+	case protocol.OpPing:
+		return "ping"
 	default:
 		return string(op)
 	}
+}
+
+func remoteCacheProbeTimeout(probeTimeout, requestTimeout time.Duration) time.Duration {
+	if probeTimeout > 0 {
+		return probeTimeout
+	}
+	if requestTimeout > 0 && requestTimeout < 10*time.Millisecond {
+		return requestTimeout
+	}
+	return 10 * time.Millisecond
 }
 
 func (c *Client) connection(ctx context.Context, node string) (Conn, error) {
@@ -210,4 +276,14 @@ func (c *Client) connection(ctx context.Context, node string) (Conn, error) {
 	}
 	c.conns[node] = conn
 	return conn, nil
+}
+
+func (c *Client) dropConnection(node string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	conn := c.conns[node]
+	delete(c.conns, node)
+	if conn != nil {
+		_ = conn.Close()
+	}
 }

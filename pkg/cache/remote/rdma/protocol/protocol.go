@@ -31,6 +31,7 @@ const (
 	OpGet    Op = "GET"
 	OpPut    Op = "PUT"
 	OpDelete Op = "DELETE"
+	OpPing   Op = "PING"
 )
 
 type Status string
@@ -95,6 +96,8 @@ func (e Executor) Handle(ctx context.Context, req Request) Response {
 		return Response{Status: StatusUnavailable}
 	}
 	switch req.Op {
+	case OpPing:
+		return Response{Status: StatusOK}
 	case OpGet:
 		return e.get(ctx, req)
 	case OpPut:

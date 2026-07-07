@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/juicedata/juicefs/pkg/cache/remote"
@@ -36,7 +37,11 @@ type Client struct {
 	placement *cluster.Placement
 	health    *cluster.Health
 
-	httpClient *http.Client
+	httpClient   *http.Client
+	probeTimeout time.Duration
+	stopCh       chan struct{}
+	closeOnce    sync.Once
+	wg           sync.WaitGroup
 }
 
 type Options struct {
@@ -66,12 +71,18 @@ func NewClientWithOptions(options Options) remote.Client {
 		}
 		nodes = append(nodes, strings.TrimRight(node, "/"))
 	}
-	return &Client{
-		nodes:      nodes,
-		placement:  cluster.NewPlacement(nodes, options.Replicas),
-		health:     cluster.NewHealth(cluster.Options{FailThreshold: options.FailThreshold, Cooldown: options.NodeCooldown, Observer: options.Observer}),
-		httpClient: &http.Client{Timeout: options.Timeout},
+	client := &Client{
+		nodes:        nodes,
+		placement:    cluster.NewPlacement(nodes, options.Replicas),
+		health:       cluster.NewHealth(cluster.Options{FailThreshold: options.FailThreshold, Cooldown: options.NodeCooldown, Observer: options.Observer}),
+		httpClient:   &http.Client{Timeout: options.Timeout},
+		probeTimeout: remoteCacheProbeTimeout(options.ProbeTimeout, options.Timeout),
+		stopCh:       make(chan struct{}),
 	}
+	if options.ProbeInterval > 0 {
+		client.startProber(options.ProbeInterval)
+	}
+	return client
 }
 
 func (c *Client) Get(ctx context.Context, key string, off, size int) (io.ReadCloser, error) {
@@ -184,7 +195,60 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 }
 
 func (c *Client) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.stopCh)
+		c.wg.Wait()
+	})
 	return nil
+}
+
+func (c *Client) startProber(interval time.Duration) {
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				c.probeUnhealthy()
+			case <-c.stopCh:
+				return
+			}
+		}
+	}()
+}
+
+func (c *Client) probeUnhealthy() {
+	for _, base := range c.health.Unhealthy(c.nodes) {
+		ctx, cancel := context.WithTimeout(context.Background(), c.probeTimeout)
+		ok := c.probeNode(ctx, base)
+		cancel()
+		c.health.MarkProbe(base, ok)
+	}
+}
+
+func (c *Client) probeNode(ctx context.Context, base string) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/healthz", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode == http.StatusNoContent
+}
+
+func remoteCacheProbeTimeout(probeTimeout, requestTimeout time.Duration) time.Duration {
+	if probeTimeout > 0 {
+		return probeTimeout
+	}
+	if requestTimeout > 0 && requestTimeout < 10*time.Millisecond {
+		return requestTimeout
+	}
+	return 10 * time.Millisecond
 }
 
 func (c *Client) replicaNodes(key, op string) ([]string, error) {

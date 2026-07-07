@@ -29,6 +29,15 @@ import (
 
 func NewHandler(cache remote.Client) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			if r.Method != http.MethodGet {
+				w.Header().Set("Allow", "GET")
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		key, ok := strings.CutPrefix(r.URL.Path, "/cache/")
 		if !ok || key == "" {
 			http.NotFound(w, r)

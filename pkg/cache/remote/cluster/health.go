@@ -73,6 +73,19 @@ func (h *Health) AvailableForOp(nodes []string, op string) []string {
 	return available
 }
 
+func (h *Health) Unhealthy(nodes []string) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	unhealthy := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		state := h.nodes[node]
+		if state != nil && state.failures >= h.options.FailThreshold {
+			unhealthy = append(unhealthy, node)
+		}
+	}
+	return unhealthy
+}
+
 func (h *Health) MarkFailure(node string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

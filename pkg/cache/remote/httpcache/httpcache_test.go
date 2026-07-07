@@ -52,6 +52,16 @@ func TestClientGetPutRangeAndDelete(t *testing.T) {
 	require.True(t, errors.Is(err, remote.ErrMiss))
 }
 
+func TestHandlerHealthz(t *testing.T) {
+	server := httptest.NewServer(NewHandler(mock.NewClient()))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/healthz")
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+}
+
 func TestClientMapsServerAndNetworkErrors(t *testing.T) {
 	backend := mock.NewClient()
 	require.NoError(t, backend.Close())
@@ -69,6 +79,45 @@ func TestClientMapsServerAndNetworkErrors(t *testing.T) {
 	client = NewClient([]string{node}, time.Second)
 	_, err = client.Get(context.Background(), "k", 0, -1)
 	require.ErrorIs(t, err, remote.ErrUnavailable)
+}
+
+func TestClientActiveProbeRecoversNodeDuringCooldown(t *testing.T) {
+	backend := mock.NewClient()
+	require.NoError(t, backend.Put(context.Background(), "k", []byte("value")))
+	available := atomic.Bool{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !available.Load() {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		NewHandler(backend).ServeHTTP(w, r)
+	}))
+	defer server.Close()
+
+	client := NewClientWithOptions(Options{
+		Nodes:         []string{server.URL},
+		Timeout:       50 * time.Millisecond,
+		Replicas:      1,
+		FailThreshold: 1,
+		NodeCooldown:  time.Hour,
+		ProbeInterval: 10 * time.Millisecond,
+		ProbeTimeout:  10 * time.Millisecond,
+	})
+	defer client.Close()
+
+	_, err := client.Get(context.Background(), "k", 0, -1)
+	require.ErrorIs(t, err, remote.ErrUnavailable)
+
+	available.Store(true)
+	require.Eventually(t, func() bool {
+		r, err := client.Get(context.Background(), "k", 0, -1)
+		if err != nil {
+			return false
+		}
+		defer r.Close()
+		data, err := io.ReadAll(r)
+		return err == nil && string(data) == "value"
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestClientWithoutNodesIsDisabled(t *testing.T) {
