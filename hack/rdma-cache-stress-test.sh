@@ -29,5 +29,8 @@ assert_contains "p95_ms"
 assert_contains "p99_ms"
 assert_contains "rdma.NewClient"
 assert_contains "httpcache.NewClientWithOptions"
+if grep -F -- "latencies <-" "$SCRIPT" >/dev/null; then
+  fail "rdma cache stress script must not block workers on an undrained latency channel"
+fi
 
 echo "ok - rdma cache stress script exposes transport and JSON latency fields"

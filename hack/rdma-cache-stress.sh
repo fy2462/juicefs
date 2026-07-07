@@ -150,7 +150,8 @@ func main() {
 
 	payload := bytes.Repeat([]byte("x"), *size)
 	deadline := time.Now().Add(*duration)
-	latencies := make(chan time.Duration, *concurrency*1024)
+	var latenciesMu sync.Mutex
+	latencies := make([]time.Duration, 0, *concurrency*1024)
 	var ops atomic.Int64
 	var errors atomic.Int64
 	var wg sync.WaitGroup
@@ -167,12 +168,13 @@ func main() {
 					continue
 				}
 				ops.Add(1)
-				latencies <- used
+				latenciesMu.Lock()
+				latencies = append(latencies, used)
+				latenciesMu.Unlock()
 			}
 		}(worker)
 	}
 	wg.Wait()
-	close(latencies)
 	elapsed := time.Since(start)
 	report := buildReport(*transport, *nodesRaw, *concurrency, *size, elapsed, ops.Load(), errors.Load(), latencies)
 	data, err := json.MarshalIndent(report, "", "  ")
@@ -237,9 +239,9 @@ func runOp(client remote.Client, timeout time.Duration, key string, payload []by
 	return time.Since(start), nil
 }
 
-func buildReport(transport, nodes string, concurrency, size int, elapsed time.Duration, ops, errors int64, latencies <-chan time.Duration) result {
+func buildReport(transport, nodes string, concurrency, size int, elapsed time.Duration, ops, errors int64, latencies []time.Duration) result {
 	values := make([]float64, 0, len(latencies))
-	for latency := range latencies {
+	for _, latency := range latencies {
 		values = append(values, float64(latency.Microseconds())/1000.0)
 	}
 	sort.Float64s(values)
