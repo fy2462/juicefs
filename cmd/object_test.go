@@ -197,6 +197,7 @@ func TestJFS(t *testing.T) {
 	}
 
 	jstore := &juiceFS{object.DefaultObjectStorage{}, "test", uint16(utils.GetUmask()), jfs}
+	defer jstore.Shutdown()
 	testFileSystem(t, jstore)
 	testFileSystem(t, object.WithPrefix(jstore, "unittest/"))
 }

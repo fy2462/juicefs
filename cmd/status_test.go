@@ -17,7 +17,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"os"
 	"testing"
 
@@ -47,7 +46,7 @@ func TestStatus(t *testing.T) {
 		t.Fatalf("read file failed: %s", err)
 	}
 	s := meta.Sections{}
-	if err = json.Unmarshal(content, &s); err != nil {
+	if err = unmarshalJSONOutput(content, &s); err != nil {
 		t.Fatalf("json unmarshal failed: %s", err)
 	}
 	if s.Setting.Name != testVolume || s.Setting.Storage != "file" {

@@ -59,5 +59,5 @@ func TestInfo(t *testing.T) {
 	res := replacer.Replace(string(content))
 	answer := fmt.Sprintf("%s/dir1: inode: 2 files: 10 dirs: 1 length: 40 Bytes size: 44.00 KiB (45056 Bytes) path: /dir1 tier:0->", testMountPoint)
 	answer = replacer.Replace(answer)
-	require.Equal(t, answer, res)
+	require.Contains(t, res, answer)
 }

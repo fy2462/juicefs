@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -76,11 +77,33 @@ func startWebdav(t *testing.T) {
 }
 
 func TestIntegration(t *testing.T) {
+	if _, err := exec.LookPath("pip"); err != nil {
+		t.Skip("integration test requires pip because integration/Makefile invokes pip")
+	}
+	if _, err := exec.LookPath("sudo"); err != nil {
+		t.Skip("integration test requires sudo because integration/Makefile invokes litmus via sudo")
+	}
+	litmusDir := "/home/travis/.m2/litmus-0.13"
+	if st, err := os.Stat(litmusDir); err != nil || !st.IsDir() {
+		t.Skipf("integration test requires litmus directory %s", litmusDir)
+	}
+	t.Setenv("MINIO_ROOT_USER", "admin")
+	t.Setenv("MINIO_ROOT_PASSWORD", "12345678")
+
 	mountTemp(t, nil, nil, []string{"--enable-ioctl"})
 	defer umountTemp(t)
 	startGateway(t)
 	startWebdav(t)
-	_ = os.Chdir("../integration")
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %s", err)
+	}
+	if err := os.Chdir(filepath.Join(wd, "../integration")); err != nil {
+		t.Fatalf("change to integration directory: %s", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
 	makeCmd := exec.Command("make")
 	makeCmd.Env = append(os.Environ(), "MOUNT_POINT="+testMountPoint)
 	out, err := makeCmd.CombinedOutput()

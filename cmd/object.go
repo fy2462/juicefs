@@ -247,6 +247,7 @@ func (j *juiceFS) List(ctx context.Context, prefix, marker, token, delimiter str
 	if delimiter != "/" {
 		return nil, false, "", utils.ErrNotSUP
 	}
+	mctx := meta.WrapWithoutCancel(ctx, pid, uid, []uint32{gid})
 	dir := j.path(prefix)
 	var objs []object.Object
 	if !strings.HasSuffix(dir, dirSuffix) {
@@ -264,7 +265,7 @@ func (j *juiceFS) List(ctx context.Context, prefix, marker, token, delimiter str
 		}
 		objs = append(objs, obj)
 	}
-	entries, err := j.readDirSorted(dir, followLink)
+	entries, err := j.readDirSorted(mctx, dir, followLink)
 	if err != 0 {
 		if err == syscall.ENOENT {
 			return nil, false, "", nil
@@ -297,7 +298,7 @@ type mEntry struct {
 
 // readDirSorted reads the directory named by dirname and returns
 // a sorted list of directory entries.
-func (j *juiceFS) readDirSorted(dirname string, followLink bool) ([]*mEntry, syscall.Errno) {
+func (j *juiceFS) readDirSorted(ctx meta.Context, dirname string, followLink bool) ([]*mEntry, syscall.Errno) {
 	f, err := j.jfs.Open(ctx, dirname, 0)
 	if err != 0 {
 		return nil, err
@@ -387,6 +388,7 @@ func (j *juiceFS) Chown(key string, owner, group string) error {
 }
 
 func (j *juiceFS) Symlink(oldName, newName string) error {
+	ctx := meta.WrapWithoutCancel(context.Background(), pid, uid, []uint32{gid})
 	p := j.path(newName)
 	err := j.jfs.Symlink(ctx, oldName, p)
 	if err == syscall.ENOENT {
@@ -399,6 +401,7 @@ func (j *juiceFS) Symlink(oldName, newName string) error {
 }
 
 func (j *juiceFS) Readlink(name string) (string, error) {
+	ctx := meta.WrapWithoutCancel(context.Background(), pid, uid, []uint32{gid})
 	target, err := j.jfs.Readlink(ctx, j.path(name))
 	return string(target), toError(err)
 }
@@ -496,7 +499,7 @@ func getDefaultChunkConf(format *meta.Format) *chunk.Config {
 }
 
 func (j *juiceFS) Shutdown() {
-	_ = j.jfs.Meta().CloseSession()
+	_ = j.jfs.Close()
 }
 
 func newJFS(endpoint, accessKey, secretKey, token string) (object.ObjectStorage, error) {

@@ -9,6 +9,9 @@ import (
 )
 
 func TestRestore(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("restore from trash requires root")
+	}
 	mountTemp(t, nil, nil, nil)
 	defer umountTemp(t)
 
@@ -56,6 +59,9 @@ func TestRestore(t *testing.T) {
 }
 
 func TestRestorePutBack(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("restore from trash requires root")
+	}
 	mountTemp(t, nil, nil, nil)
 	defer umountTemp(t)
 

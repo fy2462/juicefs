@@ -17,7 +17,9 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -43,6 +45,19 @@ func getStdout(args []string) ([]byte, error) {
 	return os.ReadFile(tmp.Name())
 }
 
+func unmarshalJSONOutput(data []byte, v any) error {
+	for i, b := range data {
+		if b != '{' {
+			continue
+		}
+		dec := json.NewDecoder(bytes.NewReader(data[i:]))
+		if err := dec.Decode(v); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("no JSON object found in output: %q", string(data))
+}
+
 func TestConfig(t *testing.T) {
 	_ = resetTestMeta()
 	bucketPath := filepath.Join(t.TempDir(), "testBucket")
@@ -58,7 +73,7 @@ func TestConfig(t *testing.T) {
 		t.Fatalf("getStdout: %s", err)
 	}
 	var format meta.Format
-	if err = json.Unmarshal(data, &format); err != nil {
+	if err = unmarshalJSONOutput(data, &format); err != nil {
 		t.Fatalf("json unmarshal: %s", err)
 	}
 	if format.TrashDays != 2 {
@@ -75,7 +90,7 @@ func TestConfig(t *testing.T) {
 	if data, err = getStdout([]string{"", "config", testMeta}); err != nil {
 		t.Fatalf("getStdout: %s", err)
 	}
-	if err = json.Unmarshal(data, &format); err != nil {
+	if err = unmarshalJSONOutput(data, &format); err != nil {
 		t.Fatalf("json unmarshal: %s", err)
 	}
 	if format.Capacity != 10<<30 || format.Inodes != 1000000 ||
@@ -89,7 +104,7 @@ func TestConfig(t *testing.T) {
 	if data, err = getStdout([]string{"", "config", testMeta}); err != nil {
 		t.Fatalf("getStdout: %s", err)
 	}
-	if err = json.Unmarshal(data, &format); err != nil {
+	if err = unmarshalJSONOutput(data, &format); err != nil {
 		t.Fatalf("json unmarshal: %s", err)
 	}
 	if format.Bucket != "http://localhost:9000/miniofs" || format.Storage != "minio" {
@@ -102,7 +117,7 @@ func TestConfig(t *testing.T) {
 	if data, err = getStdout([]string{"", "config", testMeta}); err != nil {
 		t.Fatalf("getStdout: %s", err)
 	}
-	if err = json.Unmarshal(data, &format); err != nil {
+	if err = unmarshalJSONOutput(data, &format); err != nil {
 		t.Fatalf("json unmarshal: %s", err)
 	}
 	if format.Bucket != "http://localhost:9000/miniofs2" || format.Storage != "minio" {

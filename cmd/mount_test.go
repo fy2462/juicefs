@@ -231,10 +231,14 @@ func TestUpdateFstab(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.SkipNow()
 	}
+	if os.Geteuid() != 0 {
+		t.Skip("--update-fstab requires root")
+	}
 	mockFstab, err := os.CreateTemp(t.TempDir(), "fstab")
 	if err != nil {
 		t.Fatalf("cannot make temp file: %s", err)
 	}
+	defer mockFstab.Close()
 
 	patches := gomonkey.ApplyFunc(os.Rename, func(src, dest string) error {
 		content, err := os.ReadFile(mockFstab.Name())
