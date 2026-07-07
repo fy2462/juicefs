@@ -1,0 +1,91 @@
+name: "rdma-cache"
+
+on:
+  push:
+    branches:
+      - 'main'
+      - 'release-*'
+    paths:
+      - '.github/workflows/rdma-cache.yml'
+      - 'Makefile'
+      - 'cmd/rdma_cache_server*.go'
+      - 'hack/rdma-*-smoke-test.sh'
+      - 'pkg/cache/remote/**'
+      - 'pkg/chunk/**'
+  pull_request:
+    branches:
+      - 'main'
+      - 'release-*'
+    paths:
+      - '.github/workflows/rdma-cache.yml'
+      - 'Makefile'
+      - 'cmd/rdma_cache_server*.go'
+      - 'hack/rdma-*-smoke-test.sh'
+      - 'pkg/cache/remote/**'
+      - 'pkg/chunk/**'
+  workflow_dispatch:
+    inputs:
+      debug:
+        type: boolean
+        description: "Run the build with tmate debugging enabled"
+        required: false
+        default: false
+
+jobs:
+  default-build:
+    timeout-minutes: 20
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+
+      - name: Set up Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: 'oldstable'
+          cache: true
+
+      - name: Test default RDMA compatibility
+        run: |
+          go test ./pkg/cache/remote/rdma/...
+          go test ./cmd -run 'TestRDMACacheServer'
+
+      - name: Setup upterm session
+        if: failure() && (github.event.inputs.debug == 'true' || github.run_attempt != 1)
+        timeout-minutes: 60
+        uses: lhotari/action-upterm@v1
+
+  native-build:
+    timeout-minutes: 30
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+
+      - name: Set up Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: 'oldstable'
+          cache: true
+
+      - name: Install native RDMA build dependencies
+        run: |
+          sudo .github/scripts/apt_install.sh libibverbs-dev
+
+      - name: Test RDMA tagged packages
+        run: |
+          go test -tags rdma ./pkg/cache/remote/rdma/...
+          go test -tags rdma ./cmd -run 'TestRDMACacheServer'
+
+      - name: Run native RDMA smoke
+        run: |
+          make test.rdma-native-smoke
+
+      - name: Setup upterm session
+        if: failure() && (github.event.inputs.debug == 'true' || github.run_attempt != 1)
+        timeout-minutes: 60
+        uses: lhotari/action-upterm@v1

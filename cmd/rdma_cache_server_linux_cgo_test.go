@@ -38,14 +38,13 @@ func TestRDMACacheServerTransportRDMAUsesNativeServer(t *testing.T) {
 		errCh <- runRDMACacheServer(ctx, listen, "rdma", mock.NewClient())
 	}()
 
+	waitForRDMACacheServer(t, listen, errCh)
 	client := rdma.NewClient(rdma.Options{
 		Nodes:   []string{listen},
 		Timeout: 10 * time.Millisecond,
 	})
-	require.Eventually(t, func() bool {
-		return client.Put(context.Background(), "k", []byte("data")) == nil
-	}, time.Second, 10*time.Millisecond)
 	defer client.Close()
+	require.NoError(t, client.Put(context.Background(), "k", []byte("data")))
 
 	r, err := client.Get(context.Background(), "k", 0, -1)
 	require.NoError(t, err)
@@ -71,4 +70,22 @@ func reserveRDMACacheServerAddress(t *testing.T) string {
 	require.NoError(t, err)
 	defer listener.Close()
 	return listener.Addr().String()
+}
+
+func waitForRDMACacheServer(t *testing.T, listen string, errCh <-chan error) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		select {
+		case err := <-errCh:
+			require.NoError(t, err)
+			return false
+		default:
+		}
+		conn, err := net.DialTimeout("tcp", listen, 10*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		_ = conn.Close()
+		return true
+	}, time.Second, 10*time.Millisecond)
 }
