@@ -24,7 +24,7 @@ The smoke prints numbered `ok` lines and exits zero. If neither rustfs nor Docke
 is installed, the smoke prints a clear prerequisite message and exits zero
 without running the integration path.
 
-The final three-tier check proves L2 serving rather than only proving that data
+The three-tier check proves L2 serving rather than only proving that data
 can be read:
 
 1. Client A writes a 1 MiB file with its own L1 cache.
@@ -36,6 +36,18 @@ can be read:
 
 Because Client B has a fresh L1 and L3 is offline, a successful final read proves
 the data came from L2 remote cache.
+
+The smoke also validates multi-node L2 behavior:
+
+1. Two disk-backed remote cache servers start on `127.0.0.1:9568` and
+   `127.0.0.1:9569`.
+2. A filler client reads through RustFS with `--remote-cache-replicas=2`, so both
+   L2 nodes receive cache entries.
+3. RustFS and one L2 node are stopped.
+4. A fresh-L1 client reads the file successfully through the surviving L2 node.
+5. The failed L2 node is restarted.
+6. A new object is read through RustFS and the smoke waits for the restarted L2
+   node to receive a new cache entry.
 
 The smoke also validates the opposite fallback direction:
 
