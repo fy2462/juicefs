@@ -20,6 +20,7 @@ package native
 
 import (
 	"testing"
+	"unsafe"
 
 	"github.com/stretchr/testify/require"
 )
@@ -35,6 +36,87 @@ func TestFrameLimitDefaultsAndMinimum(t *testing.T) {
 	require.Equal(t, defaultFrameBytes, frameLimit(0))
 	require.Equal(t, minFrameBytes, frameLimit(1))
 	require.Equal(t, 128<<10, frameLimit(128<<10))
+}
+
+func TestRandomPSNUsesZeroForOpenRDMAMock(t *testing.T) {
+	t.Setenv("OPEN_RDMA_DRIVER", "/tmp/open-rdma-driver")
+
+	psn, err := randomPSN()
+	require.NoError(t, err)
+	require.Zero(t, psn)
+}
+
+func TestOpenRDMAMockIPv4DefaultsToExampleAddress(t *testing.T) {
+	t.Setenv("OPEN_RDMA_DRIVER", "/tmp/open-rdma-driver")
+	t.Setenv("JFS_RDMA_GRH_IPV4", "")
+
+	ip, ok := rdmaGRHIPv4()
+
+	require.True(t, ok)
+	require.Equal(t, uint32(0x1122330a), ip)
+}
+
+func TestOpenRDMAMockIPv4CanBeOverridden(t *testing.T) {
+	t.Setenv("OPEN_RDMA_DRIVER", "/tmp/open-rdma-driver")
+	t.Setenv("JFS_RDMA_GRH_IPV4", "10.1.2.3")
+
+	ip, ok := rdmaGRHIPv4()
+
+	require.True(t, ok)
+	require.Equal(t, uint32(0x0a010203), ip)
+}
+
+func TestOpenRDMAMockDLIDMatchesExample(t *testing.T) {
+	t.Setenv("OPEN_RDMA_DRIVER", "/tmp/open-rdma-driver")
+
+	require.Zero(t, rdmaDLID(7))
+}
+
+func TestRDMADeviceDLIDUsesRemoteLID(t *testing.T) {
+	t.Setenv("OPEN_RDMA_DRIVER", "")
+
+	require.Equal(t, uint16(7), rdmaDLID(7))
+}
+
+func TestFrameBufferFallsBackToMallocWithoutOpenRDMADriver(t *testing.T) {
+	t.Setenv("OPEN_RDMA_DRIVER", "")
+
+	buffer, err := allocateFrameBuffer(minFrameBytes * 2)
+	require.NoError(t, err)
+	require.NotNil(t, buffer.ptr)
+	require.Len(t, buffer.bytes, minFrameBytes*2)
+	require.Equal(t, minFrameBytes*2, buffer.registerBytes)
+	require.NoError(t, buffer.Close())
+}
+
+func TestFrameBufferUsesHugepageWhenOpenRDMADriverIsSet(t *testing.T) {
+	t.Setenv("OPEN_RDMA_DRIVER", "/tmp/open-rdma-driver")
+
+	buffer, err := allocateFrameBuffer(minFrameBytes * 2)
+	if err != nil {
+		t.Skipf("hugepage mmap is unavailable on this host: %v", err)
+	}
+	require.NotNil(t, buffer.ptr)
+	require.Len(t, buffer.bytes, minFrameBytes*2)
+	require.GreaterOrEqual(t, buffer.registerBytes, minFrameBytes*2)
+	require.Zero(t, uintptr(buffer.ptr)%uintptr(hugePageBytes))
+	require.NoError(t, buffer.Close())
+}
+
+func TestFrameBufferCloseRejectsUnknownAllocation(t *testing.T) {
+	buffer := frameBuffer{ptr: unsafe.Pointer(uintptr(1))}
+
+	require.Error(t, buffer.Close())
+}
+
+func TestTouchFrameBufferFaultsPages(t *testing.T) {
+	data := make([]byte, osPageBytes*2+1)
+
+	touchFrameBuffer(data)
+
+	require.Zero(t, data[0])
+	require.Zero(t, data[osPageBytes])
+	require.Zero(t, data[len(data)-1])
 }
 
 func TestNewResourcesRejectsUnavailableDeviceIndex(t *testing.T) {
@@ -102,6 +184,15 @@ func TestConnectRejectsInvalidEndpoint(t *testing.T) {
 	resources := &Resources{}
 
 	require.ErrorIs(t, resources.Connect(Endpoint{}), ErrInvalidEndpoint)
+}
+
+func TestValidateEndpointAllowsZeroPSN(t *testing.T) {
+	require.NoError(t, validateEndpoint(Endpoint{
+		QPN:   1,
+		PSN:   0,
+		RKey:  1,
+		VAddr: 1,
+	}))
 }
 
 func TestConnectMovesQueuePairsToRTSWhenDeviceExists(t *testing.T) {

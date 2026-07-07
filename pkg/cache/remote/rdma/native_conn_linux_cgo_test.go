@@ -105,6 +105,15 @@ func TestNativeOptionsFromEnv(t *testing.T) {
 	require.True(t, options.requireDevice)
 }
 
+func TestNativeConnReusableFollowsOpenRDMAMock(t *testing.T) {
+	conn := &nativeConn{}
+	t.Setenv("OPEN_RDMA_DRIVER", "")
+	require.True(t, conn.Reusable())
+
+	t.Setenv("OPEN_RDMA_DRIVER", "/tmp/open-rdma-driver")
+	require.False(t, conn.Reusable())
+}
+
 func TestNativeDialerRequiresDeviceWhenConfigured(t *testing.T) {
 	dialer := &nativeDialer{options: nativeOptions{
 		deviceIndex:   1 << 20,

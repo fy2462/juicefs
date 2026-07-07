@@ -60,6 +60,10 @@ type Conn interface {
 	Close() error
 }
 
+type reusableConn interface {
+	Reusable() bool
+}
+
 type Dialer interface {
 	Dial(ctx context.Context, node string, options Options) (Conn, error)
 }
@@ -165,17 +169,20 @@ func (c *Client) roundTrip(ctx context.Context, req protocol.Request) (protocol.
 		return protocol.Response{}, remote.ErrUnavailable
 	}
 	var sawMiss bool
+	var lastErr error
 	for _, node := range nodes {
 		conn, err := c.connection(ctx, node)
 		if err != nil {
 			if errors.Is(err, ErrUnsupported) {
 				return protocol.Response{}, err
 			}
+			lastErr = err
 			c.health.MarkFailure(node)
 			continue
 		}
 		resp, err := conn.RoundTrip(ctx, req)
 		if err != nil {
+			lastErr = err
 			c.dropConnection(node)
 			c.health.MarkFailure(node)
 			continue
@@ -183,9 +190,11 @@ func (c *Client) roundTrip(ctx context.Context, req protocol.Request) (protocol.
 		switch resp.Status {
 		case protocol.StatusOK:
 			c.health.MarkSuccess(node)
+			c.releaseIfNotReusable(node, conn)
 			return resp, nil
 		case protocol.StatusMiss:
 			c.health.MarkSuccess(node)
+			c.releaseIfNotReusable(node, conn)
 			if req.Op == protocol.OpGet {
 				sawMiss = true
 				continue
@@ -194,13 +203,14 @@ func (c *Client) roundTrip(ctx context.Context, req protocol.Request) (protocol.
 				return protocol.Response{Status: protocol.StatusOK}, nil
 			}
 		default:
+			lastErr = protocol.StatusToError(resp.Status)
 			c.health.MarkFailure(node)
 		}
 	}
 	if sawMiss {
 		return protocol.Response{Status: protocol.StatusMiss}, nil
 	}
-	return protocol.Response{}, remote.ErrUnavailable
+	return protocol.Response{}, errors.Join(remote.ErrUnavailable, lastErr)
 }
 
 func (c *Client) startProber(interval time.Duration) {
@@ -239,6 +249,7 @@ func (c *Client) probeNode(ctx context.Context, node string) bool {
 		c.dropConnection(node)
 		return false
 	}
+	c.releaseIfNotReusable(node, conn)
 	return resp.Status == protocol.StatusOK
 }
 
@@ -292,4 +303,18 @@ func (c *Client) dropConnection(node string) {
 	if conn != nil {
 		_ = conn.Close()
 	}
+}
+
+func (c *Client) releaseIfNotReusable(node string, conn Conn) {
+	reusable, ok := conn.(reusableConn)
+	if !ok || reusable.Reusable() {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conns[node] != conn {
+		return
+	}
+	delete(c.conns, node)
+	_ = conn.Close()
 }

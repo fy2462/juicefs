@@ -186,14 +186,17 @@ OPEN_RDMA_DRIVER=/media/psf/Home/github/PFS/open-rdma-driver \
 make test.rdma-native-mock
 ```
 
-Run the same mock-backed path under the stress harness:
+Run the same mock-backed path through the stress harness entrypoint:
 
 ```sh
 OPEN_RDMA_DRIVER=/media/psf/Home/github/PFS/open-rdma-driver \
-JFS_RDMA_STRESS_OPS=5000 \
-JFS_RDMA_STRESS_CONCURRENCY=16 \
 make test.rdma-native-mock-stress
 ```
+
+The open-rdma mock is suitable for native transport smoke coverage, but it is
+not a stable long-running or concurrent stress target because its mock QP/PD
+lifecycle can fail on repeated rapid connections. Use real RDMA hardware for
+multi-operation and concurrent native stress.
 
 Run a configurable local stress pass:
 

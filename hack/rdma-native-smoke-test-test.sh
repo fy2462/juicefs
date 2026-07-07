@@ -16,6 +16,13 @@ assert_contains() {
     fail "expected rdma native smoke script to contain: $pattern"
 }
 
+assert_not_contains() {
+  pattern="$1"
+  if grep -F -- "$pattern" "$SCRIPT" >/dev/null; then
+    fail "rdma native smoke script should not contain: $pattern"
+  fi
+}
+
 assert_makefile_contains() {
   pattern="$1"
   grep -F -- "$pattern" "$MAKEFILE" >/dev/null ||
@@ -28,6 +35,10 @@ assert_contains "duration_ms"
 assert_contains "--mock-rdma"
 assert_contains "OPEN_RDMA_DRIVER"
 assert_contains "LD_LIBRARY_PATH"
+assert_contains "JFS_RDMA_SMOKE_SKIP_TCP_PROBE"
+assert_contains "JFS_RDMA_SMOKE_SERVER_DEVICE_INDEX"
+assert_contains "JFS_RDMA_SMOKE_CLIENT_DEVICE_INDEX"
+assert_not_contains '. "$MOCK_RDMA_DIR/scripts/setup-env.sh"'
 assert_makefile_contains "test.rdma-native-mock:"
 assert_makefile_contains '--mock-rdma "$${OPEN_RDMA_DRIVER'
 assert_makefile_contains "test.rdma-native-mock-stress:"

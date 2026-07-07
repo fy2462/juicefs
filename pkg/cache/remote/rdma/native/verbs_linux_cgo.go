@@ -35,6 +35,41 @@ static void jfs_set_send_wr_opcode(struct ibv_send_wr *wr) {
 static void jfs_set_send_wr_flags(struct ibv_send_wr *wr) {
 	wr->send_flags = IBV_SEND_SIGNALED;
 }
+
+static int jfs_ibv_post_recv(struct ibv_qp *qp, uint64_t addr, uint32_t length, uint32_t lkey) {
+	struct ibv_sge sge = {
+		.addr = addr,
+		.length = length,
+		.lkey = lkey,
+	};
+	struct ibv_recv_wr wr = {
+		.wr_id = 1,
+		.sg_list = &sge,
+		.num_sge = 1,
+	};
+	struct ibv_recv_wr *bad = NULL;
+	return ibv_post_recv(qp, &wr, &bad);
+}
+
+static int jfs_ibv_post_send(struct ibv_qp *qp, uint64_t addr, uint32_t length, uint32_t lkey, uint64_t remote_addr, uint32_t rkey) {
+	struct ibv_sge sge = {
+		.addr = addr,
+		.length = length,
+		.lkey = lkey,
+	};
+	struct ibv_send_wr wr = {
+		.wr_id = 2,
+		.sg_list = &sge,
+		.num_sge = 1,
+	};
+	wr.opcode = IBV_WR_SEND;
+	wr.send_flags = IBV_SEND_SIGNALED;
+	wr.imm_data = 11;
+	wr.wr.rdma.remote_addr = remote_addr;
+	wr.wr.rdma.rkey = rkey;
+	struct ibv_send_wr *bad = NULL;
+	return ibv_post_send(qp, &wr, &bad);
+}
 */
 import "C"
 
@@ -43,15 +78,20 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"runtime"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
 	minFrameBytes     = 64 << 10
 	defaultFrameBytes = 4 << 20
 	defaultCQTimeout  = 50 * time.Millisecond
+	osPageBytes       = 4 << 10
 )
 
 type Resources struct {
@@ -60,11 +100,13 @@ type Resources struct {
 	portNum           uint8
 	psn               uint32
 	connected         bool
+	remote            Endpoint
 	context           *C.struct_ibv_context
 	protectionDomain  *C.struct_ibv_pd
 	completionQueue   *C.struct_ibv_cq
 	queuePair         *C.struct_ibv_qp
 	memoryRegion      *C.struct_ibv_mr
+	frameBuffer       frameBuffer
 	bufferPtr         unsafe.Pointer
 	buffer            []byte
 	sendBuffer        []byte
@@ -77,6 +119,16 @@ type ResourceOptions struct {
 	PortNum       uint8
 	MaxFrameBytes int
 	CQTimeout     time.Duration
+}
+
+const hugePageBytes = 2 << 20
+
+type frameBuffer struct {
+	ptr           unsafe.Pointer
+	bytes         []byte
+	registerBytes int
+	mmap          []byte
+	malloc        bool
 }
 
 type Endpoint struct {
@@ -150,7 +202,10 @@ func (r *Resources) Close() error {
 		r.memoryRegion = nil
 	}
 	if r.bufferPtr != nil {
-		C.free(r.bufferPtr)
+		if closeErr := r.frameBuffer.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+		r.frameBuffer = frameBuffer{}
 		r.bufferPtr = nil
 		r.buffer = nil
 		r.sendBuffer = nil
@@ -174,6 +229,71 @@ func (r *Resources) Close() error {
 		r.context = nil
 	}
 	return err
+}
+
+func allocateFrameBuffer(regionBytes int) (frameBuffer, error) {
+	if regionBytes <= 0 {
+		return frameBuffer{}, fmt.Errorf("allocate RDMA frame buffer: invalid size %d", regionBytes)
+	}
+	if os.Getenv("OPEN_RDMA_DRIVER") != "" {
+		return allocateHugepageFrameBuffer(regionBytes)
+	}
+	ptr := C.calloc(C.size_t(regionBytes), 1)
+	if ptr == nil {
+		return frameBuffer{}, fmt.Errorf("allocate RDMA frame buffer: %w", errnoError())
+	}
+	return frameBuffer{
+		ptr:           ptr,
+		bytes:         unsafe.Slice((*byte)(ptr), regionBytes),
+		registerBytes: regionBytes,
+		malloc:        true,
+	}, nil
+}
+
+func allocateHugepageFrameBuffer(regionBytes int) (frameBuffer, error) {
+	allocBytes := roundUp(regionBytes, hugePageBytes)
+	mapping, err := unix.Mmap(-1, 0, allocBytes, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_PRIVATE|unix.MAP_ANONYMOUS|unix.MAP_HUGETLB)
+	if err != nil {
+		return frameBuffer{}, fmt.Errorf("allocate RDMA hugepage frame buffer: %w", err)
+	}
+	if len(mapping) == 0 {
+		_ = unix.Munmap(mapping)
+		return frameBuffer{}, errors.New("allocate RDMA hugepage frame buffer: empty mapping")
+	}
+	touchFrameBuffer(mapping)
+	return frameBuffer{
+		ptr:           unsafe.Pointer(&mapping[0]),
+		bytes:         mapping[:regionBytes],
+		registerBytes: allocBytes,
+		mmap:          mapping,
+	}, nil
+}
+
+func touchFrameBuffer(buffer []byte) {
+	if len(buffer) == 0 {
+		return
+	}
+	for offset := 0; offset < len(buffer); offset += osPageBytes {
+		buffer[offset] = 0
+	}
+	buffer[len(buffer)-1] = 0
+}
+
+func (b *frameBuffer) Close() error {
+	if b == nil || b.ptr == nil {
+		return nil
+	}
+	if b.mmap != nil {
+		err := unix.Munmap(b.mmap)
+		*b = frameBuffer{}
+		return err
+	}
+	if b.malloc {
+		C.free(b.ptr)
+		*b = frameBuffer{}
+		return nil
+	}
+	return errors.New("release RDMA frame buffer: unknown allocation type")
 }
 
 func (r *Resources) LocalEndpoint() (Endpoint, error) {
@@ -213,6 +333,7 @@ func (r *Resources) Connect(remote Endpoint) error {
 	if err := r.modifyToRTS(); err != nil {
 		return err
 	}
+	r.remote = remote
 	r.connected = true
 	return nil
 }
@@ -228,16 +349,7 @@ func (r *Resources) PostRecv() error {
 	if r == nil || r.queuePair == nil || r.memoryRegion == nil || len(r.buffer) == 0 {
 		return ErrNoDevice
 	}
-	var sge C.struct_ibv_sge
-	sge.addr = C.uint64_t(uintptr(r.bufferPtr))
-	sge.length = C.uint32_t(len(r.buffer))
-	sge.lkey = r.memoryRegion.lkey
-	var wr C.struct_ibv_recv_wr
-	wr.wr_id = 1
-	wr.sg_list = &sge
-	wr.num_sge = 1
-	var bad *C.struct_ibv_recv_wr
-	if rc := C.ibv_post_recv(r.queuePair, &wr, &bad); rc != 0 {
+	if rc := C.jfs_ibv_post_recv(r.queuePair, C.uint64_t(uintptr(r.bufferPtr)), C.uint32_t(len(r.buffer)), C.uint32_t(r.memoryRegion.lkey)); rc != 0 {
 		return fmt.Errorf("post RDMA recv: %w", errnoError())
 	}
 	return nil
@@ -253,18 +365,7 @@ func (r *Resources) PostSend(payload []byte) error {
 	if r == nil || r.queuePair == nil || r.memoryRegion == nil || len(r.sendBuffer) == 0 {
 		return ErrNoDevice
 	}
-	var sge C.struct_ibv_sge
-	sge.addr = C.uint64_t(uintptr(unsafe.Pointer(&r.sendBuffer[0])))
-	sge.length = C.uint32_t(len(payload))
-	sge.lkey = r.memoryRegion.lkey
-	var wr C.struct_ibv_send_wr
-	wr.wr_id = 2
-	wr.sg_list = &sge
-	wr.num_sge = 1
-	C.jfs_set_send_wr_opcode(&wr)
-	C.jfs_set_send_wr_flags(&wr)
-	var bad *C.struct_ibv_send_wr
-	if rc := C.ibv_post_send(r.queuePair, &wr, &bad); rc != 0 {
+	if rc := C.jfs_ibv_post_send(r.queuePair, C.uint64_t(uintptr(unsafe.Pointer(&r.sendBuffer[0]))), C.uint32_t(len(payload)), C.uint32_t(r.memoryRegion.lkey), C.uint64_t(r.remote.VAddr), C.uint32_t(r.remote.RKey)); rc != 0 {
 		return fmt.Errorf("post RDMA send: %w", errnoError())
 	}
 	return nil
@@ -328,15 +429,17 @@ func (r *Resources) open(device *C.struct_ibv_device) error {
 		return fmt.Errorf("create RDMA completion queue: %w", errnoError())
 	}
 	regionBytes := r.maxFrameBytes * 2
-	r.bufferPtr = C.calloc(C.size_t(regionBytes), 1)
-	if r.bufferPtr == nil {
-		return fmt.Errorf("allocate RDMA frame buffer: %w", errnoError())
+	frameBuffer, err := allocateFrameBuffer(regionBytes)
+	if err != nil {
+		return err
 	}
-	region := unsafe.Slice((*byte)(r.bufferPtr), regionBytes)
+	r.frameBuffer = frameBuffer
+	r.bufferPtr = frameBuffer.ptr
+	region := frameBuffer.bytes
 	r.buffer = region[:r.maxFrameBytes]
 	r.sendBuffer = region[r.maxFrameBytes:]
 	access := C.IBV_ACCESS_LOCAL_WRITE | C.IBV_ACCESS_REMOTE_READ | C.IBV_ACCESS_REMOTE_WRITE
-	r.memoryRegion = C.ibv_reg_mr(r.protectionDomain, r.bufferPtr, C.size_t(regionBytes), C.int(access))
+	r.memoryRegion = C.ibv_reg_mr(r.protectionDomain, r.bufferPtr, C.size_t(frameBuffer.registerBytes), C.int(access))
 	if r.memoryRegion == nil {
 		return fmt.Errorf("register RDMA memory region: %w", errnoError())
 	}
@@ -356,8 +459,8 @@ func (r *Resources) createQueuePair() error {
 	initAttr.send_cq = r.completionQueue
 	initAttr.recv_cq = r.completionQueue
 	initAttr.qp_type = C.IBV_QPT_RC
-	initAttr.cap.max_send_wr = 16
-	initAttr.cap.max_recv_wr = 16
+	initAttr.cap.max_send_wr = 1
+	initAttr.cap.max_recv_wr = 1
 	initAttr.cap.max_send_sge = 1
 	initAttr.cap.max_recv_sge = 1
 	r.queuePair = C.ibv_create_qp(r.protectionDomain, &initAttr)
@@ -383,15 +486,23 @@ func (r *Resources) modifyToInit() error {
 func (r *Resources) modifyToRTR(remote Endpoint) error {
 	var attr C.struct_ibv_qp_attr
 	attr.qp_state = C.IBV_QPS_RTR
-	attr.path_mtu = C.IBV_MTU_1024
+	attr.path_mtu = C.IBV_MTU_4096
 	attr.dest_qp_num = C.uint32_t(remote.QPN)
 	attr.rq_psn = C.uint32_t(remote.PSN)
 	attr.max_dest_rd_atomic = 1
 	attr.min_rnr_timer = 12
-	attr.ah_attr.dlid = C.uint16_t(remote.LID)
+	attr.ah_attr.dlid = C.uint16_t(rdmaDLID(remote.LID))
 	attr.ah_attr.sl = 0
 	attr.ah_attr.src_path_bits = 0
 	attr.ah_attr.port_num = C.uint8_t(r.portNum)
+	if ipv4, ok := rdmaGRHIPv4(); ok {
+		attr.ah_attr.grh.dgid[10] = 0xff
+		attr.ah_attr.grh.dgid[11] = 0xff
+		attr.ah_attr.grh.dgid[12] = byte((ipv4 >> 24) & 0xff)
+		attr.ah_attr.grh.dgid[13] = byte((ipv4 >> 16) & 0xff)
+		attr.ah_attr.grh.dgid[14] = byte((ipv4 >> 8) & 0xff)
+		attr.ah_attr.grh.dgid[15] = byte(ipv4 & 0xff)
+	}
 	mask := C.IBV_QP_STATE | C.IBV_QP_AV | C.IBV_QP_PATH_MTU | C.IBV_QP_DEST_QPN | C.IBV_QP_RQ_PSN | C.IBV_QP_MAX_DEST_RD_ATOMIC | C.IBV_QP_MIN_RNR_TIMER
 	if rc := C.ibv_modify_qp(r.queuePair, &attr, C.int(mask)); rc != 0 {
 		return fmt.Errorf("modify RDMA queue pair to RTR: %w", errnoError())
@@ -407,7 +518,16 @@ func (r *Resources) modifyToRTS() error {
 	attr.rnr_retry = 7
 	attr.sq_psn = C.uint32_t(r.psn)
 	attr.max_rd_atomic = 1
-	mask := C.IBV_QP_STATE | C.IBV_QP_TIMEOUT | C.IBV_QP_RETRY_CNT | C.IBV_QP_RNR_RETRY | C.IBV_QP_SQ_PSN | C.IBV_QP_MAX_QP_RD_ATOMIC
+	attr.ah_attr.port_num = C.uint8_t(r.portNum)
+	if ipv4, ok := rdmaGRHIPv4(); ok {
+		attr.ah_attr.grh.dgid[10] = 0xff
+		attr.ah_attr.grh.dgid[11] = 0xff
+		attr.ah_attr.grh.dgid[12] = byte((ipv4 >> 24) & 0xff)
+		attr.ah_attr.grh.dgid[13] = byte((ipv4 >> 16) & 0xff)
+		attr.ah_attr.grh.dgid[14] = byte((ipv4 >> 8) & 0xff)
+		attr.ah_attr.grh.dgid[15] = byte(ipv4 & 0xff)
+	}
+	mask := C.IBV_QP_STATE | C.IBV_QP_AV | C.IBV_QP_TIMEOUT | C.IBV_QP_RETRY_CNT | C.IBV_QP_RNR_RETRY | C.IBV_QP_SQ_PSN | C.IBV_QP_MAX_QP_RD_ATOMIC
 	if rc := C.ibv_modify_qp(r.queuePair, &attr, C.int(mask)); rc != 0 {
 		return fmt.Errorf("modify RDMA queue pair to RTS: %w", errnoError())
 	}
@@ -428,6 +548,9 @@ func errnoError() error {
 }
 
 func randomPSN() (uint32, error) {
+	if os.Getenv("OPEN_RDMA_DRIVER") != "" {
+		return 0, nil
+	}
 	var data [4]byte
 	if _, err := rand.Read(data[:]); err != nil {
 		return 0, fmt.Errorf("generate RDMA packet sequence number: %w", err)
@@ -435,8 +558,30 @@ func randomPSN() (uint32, error) {
 	return binary.BigEndian.Uint32(data[:]) & 0xffffff, nil
 }
 
+func rdmaGRHIPv4() (uint32, bool) {
+	value := os.Getenv("JFS_RDMA_GRH_IPV4")
+	if value == "" {
+		if os.Getenv("OPEN_RDMA_DRIVER") == "" {
+			return 0, false
+		}
+		value = "17.34.51.10"
+	}
+	ip := net.ParseIP(value).To4()
+	if ip == nil {
+		return 0, false
+	}
+	return uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3]), true
+}
+
+func rdmaDLID(remoteLID uint16) uint16 {
+	if os.Getenv("OPEN_RDMA_DRIVER") != "" {
+		return 0
+	}
+	return remoteLID
+}
+
 func validateEndpoint(endpoint Endpoint) error {
-	if endpoint.QPN == 0 || endpoint.PSN == 0 || endpoint.RKey == 0 || endpoint.VAddr == 0 {
+	if endpoint.QPN == 0 || endpoint.RKey == 0 || endpoint.VAddr == 0 {
 		return ErrInvalidEndpoint
 	}
 	return nil
@@ -450,4 +595,15 @@ func frameLimit(value int) int {
 		return minFrameBytes
 	}
 	return value
+}
+
+func roundUp(value, unit int) int {
+	if unit <= 0 || value <= 0 {
+		return value
+	}
+	remainder := value % unit
+	if remainder == 0 {
+		return value
+	}
+	return value + unit - remainder
 }

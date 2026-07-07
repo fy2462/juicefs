@@ -18,6 +18,7 @@ package rdma
 
 import (
 	"context"
+	"errors"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -154,6 +155,38 @@ func TestClientRoundTripMiss(t *testing.T) {
 	require.NoError(t, client.Close())
 }
 
+func TestClientReleasesNonReusableConnAfterSuccess(t *testing.T) {
+	conn := &nonReusableConn{server: NewServer(mock.NewClient())}
+	client := newClient(Options{
+		Nodes:    []string{"node-a"},
+		Replicas: 1,
+		Dialer:   staticDialer{conn: conn},
+	})
+	defer client.Close()
+
+	require.NoError(t, client.Put(context.Background(), "k", []byte("v")))
+
+	require.Equal(t, int32(1), conn.closes.Load())
+	client.mu.Lock()
+	_, exists := client.conns["node-a"]
+	client.mu.Unlock()
+	require.False(t, exists)
+}
+
+func TestClientUnavailablePreservesLastRoundTripError(t *testing.T) {
+	roundTripErr := errors.New("verbs completion timed out")
+	client := NewClient(Options{
+		Nodes:  []string{"node-a"},
+		Dialer: staticDialer{conn: errorConn{err: roundTripErr}},
+	})
+
+	err := client.Put(context.Background(), "k", []byte("v"))
+	require.ErrorIs(t, err, remote.ErrUnavailable)
+	require.ErrorIs(t, err, roundTripErr)
+	require.Contains(t, err.Error(), "verbs completion timed out")
+	require.NoError(t, client.Close())
+}
+
 func TestClientSkipsFailedNodeAndUsesHealthyReplica(t *testing.T) {
 	backend := mock.NewClient()
 	require.NoError(t, backend.Put(context.Background(), "k", []byte("value")))
@@ -226,6 +259,26 @@ func (d memoryDialer) Dial(ctx context.Context, node string, options Options) (C
 	return memoryConn{server: d.server}, nil
 }
 
+type staticDialer struct {
+	conn Conn
+}
+
+func (d staticDialer) Dial(ctx context.Context, node string, options Options) (Conn, error) {
+	return d.conn, nil
+}
+
+type errorConn struct {
+	err error
+}
+
+func (c errorConn) RoundTrip(ctx context.Context, req protocol.Request) (protocol.Response, error) {
+	return protocol.Response{}, c.err
+}
+
+func (c errorConn) Close() error {
+	return nil
+}
+
 type routingDialer struct {
 	servers map[string]*Server
 	dials   map[string]*atomic.Int32
@@ -260,6 +313,24 @@ func (c memoryConn) RoundTrip(ctx context.Context, req protocol.Request) (protoc
 
 func (c memoryConn) Close() error {
 	return nil
+}
+
+type nonReusableConn struct {
+	server *Server
+	closes atomic.Int32
+}
+
+func (c *nonReusableConn) RoundTrip(ctx context.Context, req protocol.Request) (protocol.Response, error) {
+	return memoryConn{server: c.server}.RoundTrip(ctx, req)
+}
+
+func (c *nonReusableConn) Close() error {
+	c.closes.Add(1)
+	return nil
+}
+
+func (c *nonReusableConn) Reusable() bool {
+	return false
 }
 
 type dynamicDialer struct {

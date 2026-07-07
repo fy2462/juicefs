@@ -21,10 +21,12 @@ package rdma
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"strconv"
@@ -259,19 +261,36 @@ func (c *nativeConn) RoundTrip(ctx context.Context, req protocol.Request) (proto
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.resources != nil {
+		nativeDebug("client: post recv")
 		if err := c.resources.PostRecv(); err != nil {
 			return protocol.Response{}, err
 		}
+		nativeDebug("client: ready write")
+		if err := writeNativeReady(ctx, c.conn); err != nil {
+			return protocol.Response{}, err
+		}
+		nativeDebug("client: ready read")
+		if err := readNativeReady(ctx, c.conn); err != nil {
+			return protocol.Response{}, err
+		}
+		nativeDebug("client: post send bytes=%d", len(frame))
 		if err := c.resources.PostSend(frame); err != nil {
 			return protocol.Response{}, err
 		}
+		nativeDebug("client: poll send")
 		if _, err := c.resources.PollCompletion(); err != nil {
 			return protocol.Response{}, err
 		}
+		nativeDebug("client: poll recv")
 		n, err := c.resources.PollCompletion()
 		if err != nil {
 			return protocol.Response{}, err
 		}
+		n, err = completedFrameBytes(c.resources.Buffer(), n, c.maxFrameBytes)
+		if err != nil {
+			return protocol.Response{}, err
+		}
+		nativeDebug("client: got recv bytes=%d", n)
 		respFrame, err := readFrame(bytes.NewReader(c.resources.Buffer()[:n]), c.maxFrameBytes)
 		if err != nil {
 			return protocol.Response{}, err
@@ -300,6 +319,10 @@ func (c *nativeConn) Close() error {
 	}
 	err = errors.Join(err, c.conn.Close())
 	return err
+}
+
+func (c *nativeConn) Reusable() bool {
+	return os.Getenv("OPEN_RDMA_DRIVER") == ""
 }
 
 func encodeNativeEndpoint(endpoint native.Endpoint) ([]byte, error) {
@@ -348,7 +371,10 @@ func clientNativeHandshake(ctx context.Context, conn net.Conn, resources nativeR
 	if err != nil {
 		return err
 	}
-	return resources.Connect(remote)
+	if err := resources.Connect(remote); err != nil {
+		return err
+	}
+	return clientNativeReady(ctx, conn)
 }
 
 func serverNativeHandshake(ctx context.Context, conn net.Conn, resources nativeResource) error {
@@ -371,7 +397,10 @@ func serverNativeHandshake(ctx context.Context, conn net.Conn, resources nativeR
 	if err := writeHandshakeFrame(ctx, conn, localFrame); err != nil {
 		return err
 	}
-	return resources.Connect(remote)
+	if err := resources.Connect(remote); err != nil {
+		return err
+	}
+	return serverNativeReady(ctx, conn)
 }
 
 func readHandshakeFrame(ctx context.Context, conn net.Conn) ([]byte, error) {
@@ -412,7 +441,7 @@ func serveNativeConnWithResourceFactory(ctx context.Context, conn net.Conn, serv
 		if err := serverNativeHandshake(ctx, conn, resources); err != nil {
 			return
 		}
-		serveNativeResourceFrames(ctx, resources, server, maxFrameBytes)
+		serveNativeResourceFrames(ctx, conn, resources, server, maxFrameBytes)
 		return
 	} else if requireDevice || !errors.Is(err, native.ErrNoDevice) {
 		return
@@ -449,25 +478,40 @@ func serveNativeConnWithResourceFactory(ctx context.Context, conn net.Conn, serv
 	}
 }
 
-func serveNativeResourceFrames(ctx context.Context, resources nativeResource, server *Server, maxFrameBytes int) {
+func serveNativeResourceFrames(ctx context.Context, conn net.Conn, resources nativeResource, server *Server, maxFrameBytes int) {
 	for {
-		if err := serveNativeResourceFrame(ctx, resources, server, maxFrameBytes); err != nil {
+		if err := serveNativeResourceFrame(ctx, conn, resources, server, maxFrameBytes); err != nil {
 			return
 		}
 	}
 }
 
-func serveNativeResourceFrame(ctx context.Context, resources nativeResource, server *Server, maxFrameBytes int) error {
+func serveNativeResourceFrame(ctx context.Context, conn net.Conn, resources nativeResource, server *Server, maxFrameBytes int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	nativeDebug("server: post recv")
 	if err := resources.PostRecv(); err != nil {
 		return err
 	}
+	nativeDebug("server: ready read")
+	if err := readNativeReady(ctx, conn); err != nil {
+		return err
+	}
+	nativeDebug("server: ready write")
+	if err := writeNativeReady(ctx, conn); err != nil {
+		return err
+	}
+	nativeDebug("server: poll recv")
 	n, err := resources.PollCompletion()
 	if err != nil {
 		return err
 	}
+	n, err = completedFrameBytes(resources.Buffer(), n, maxFrameBytes)
+	if err != nil {
+		return err
+	}
+	nativeDebug("server: got recv bytes=%d", n)
 	reqFrame, err := readFrame(bytes.NewReader(resources.Buffer()[:n]), maxFrameBytes)
 	if err != nil {
 		return err
@@ -480,11 +524,70 @@ func serveNativeResourceFrame(ctx context.Context, resources nativeResource, ser
 	if err != nil {
 		return err
 	}
+	nativeDebug("server: post send bytes=%d", len(frame))
 	if err := resources.PostSend(frame); err != nil {
 		return err
 	}
+	nativeDebug("server: poll send")
 	_, err = resources.PollCompletion()
 	return err
+}
+
+func completedFrameBytes(buffer []byte, completedBytes int, maxFrameBytes int) (int, error) {
+	if completedBytes > 0 {
+		return completedBytes, nil
+	}
+	if len(buffer) < 4 {
+		return 0, io.ErrUnexpectedEOF
+	}
+	payloadBytes := int(binary.BigEndian.Uint32(buffer[:4]))
+	if payloadBytes > maxFrameBytes {
+		return 0, fmt.Errorf("rdma completion frame payload %d exceeds limit %d", payloadBytes, maxFrameBytes)
+	}
+	frameBytes := 4 + payloadBytes
+	if frameBytes > len(buffer) {
+		return 0, io.ErrUnexpectedEOF
+	}
+	return frameBytes, nil
+}
+
+func nativeDebug(format string, args ...any) {
+	if os.Getenv("JFS_RDMA_NATIVE_DEBUG") == "" {
+		return
+	}
+	log.Printf("[rdma-native-debug] "+format, args...)
+}
+
+func writeNativeReady(ctx context.Context, conn net.Conn) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetWriteDeadline(deadline)
+		defer conn.SetWriteDeadline(time.Time{})
+	}
+	return writeAll(conn, []byte{1})
+}
+
+func readNativeReady(ctx context.Context, conn net.Conn) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetReadDeadline(deadline)
+		defer conn.SetReadDeadline(time.Time{})
+	}
+	var ready [1]byte
+	_, err := io.ReadFull(conn, ready[:])
+	return err
+}
+
+func clientNativeReady(ctx context.Context, conn net.Conn) error {
+	if err := writeNativeReady(ctx, conn); err != nil {
+		return err
+	}
+	return readNativeReady(ctx, conn)
+}
+
+func serverNativeReady(ctx context.Context, conn net.Conn) error {
+	if err := readNativeReady(ctx, conn); err != nil {
+		return err
+	}
+	return writeNativeReady(ctx, conn)
 }
 
 func (ibverbsResourceFactory) New(deviceIndex int, portNum uint8, maxFrameBytes int, cqTimeout time.Duration) (nativeResource, error) {

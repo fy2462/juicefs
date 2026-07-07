@@ -28,6 +28,10 @@ Environment:
   JFS_RDMA_SMOKE_CONCURRENCY  Concurrent workers. Default: 1.
   JFS_RDMA_BIN                Reuse an existing rdma-tagged juicefs binary.
   JFS_RDMA_SMOKE_REPORT       Optional path for a JSON performance summary.
+  JFS_RDMA_SMOKE_SERVER_DEVICE_INDEX
+                              RDMA device index for rdma-cache-server.
+  JFS_RDMA_SMOKE_CLIENT_DEVICE_INDEX
+                              RDMA device index for the smoke client.
 EOF
 }
 
@@ -111,13 +115,14 @@ enable_mock_rdma() {
   "$ROOT_DIR/hack/open-rdma-smoke-test.sh" --driver-dir "$MOCK_RDMA_DIR" --strict
   OPEN_RDMA_DRIVER="$MOCK_RDMA_DIR"
   export OPEN_RDMA_DRIVER
-  if [ -f "$MOCK_RDMA_DIR/scripts/setup-env.sh" ]; then
-    # shellcheck disable=SC1090
-    . "$MOCK_RDMA_DIR/scripts/setup-env.sh"
-  fi
   mock_libs="$MOCK_RDMA_DIR/dtld-ibverbs/target/debug:$MOCK_RDMA_DIR/dtld-ibverbs/rdma-core-55.0/build/lib"
+  [ -d "$MOCK_RDMA_DIR/dtld-ibverbs/target/debug" ] || fail "missing open-rdma mock library dir: $MOCK_RDMA_DIR/dtld-ibverbs/target/debug"
+  [ -d "$MOCK_RDMA_DIR/dtld-ibverbs/rdma-core-55.0/build/lib" ] || fail "missing open-rdma rdma-core library dir: $MOCK_RDMA_DIR/dtld-ibverbs/rdma-core-55.0/build/lib"
   LD_LIBRARY_PATH="$mock_libs:${LD_LIBRARY_PATH:-}"
+  JFS_RDMA_SMOKE_SERVER_DEVICE_INDEX="${JFS_RDMA_SMOKE_SERVER_DEVICE_INDEX:-0}"
+  JFS_RDMA_SMOKE_CLIENT_DEVICE_INDEX="${JFS_RDMA_SMOKE_CLIENT_DEVICE_INDEX:-1}"
   export LD_LIBRARY_PATH
+  export JFS_RDMA_SMOKE_SERVER_DEVICE_INDEX JFS_RDMA_SMOKE_CLIENT_DEVICE_INDEX
 }
 
 require_rdma_device_for_strict() {
@@ -207,6 +212,10 @@ func main() {
 }
 
 func waitForServer(addr string) error {
+	if os.Getenv("JFS_RDMA_SMOKE_SKIP_TCP_PROBE") == "true" {
+		time.Sleep(500 * time.Millisecond)
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	ticker := time.NewTicker(50 * time.Millisecond)
@@ -351,8 +360,9 @@ build_server() {
 start_server() {
   bin="$1"
   cache_dir="$TMP_DIR/cache"
+  server_device_index="${JFS_RDMA_SMOKE_SERVER_DEVICE_INDEX:-${JFS_RDMA_DEVICE_INDEX:-0}}"
   mkdir -p "$cache_dir"
-  JFS_RDMA_REQUIRE_DEVICE="$STRICT_DEVICE" "$bin" rdma-cache-server \
+  JFS_RDMA_REQUIRE_DEVICE="$STRICT_DEVICE" JFS_RDMA_DEVICE_INDEX="$server_device_index" "$bin" rdma-cache-server \
     --listen "$ADDR" \
     --transport rdma \
     --cache-dir "$cache_dir" \
@@ -361,7 +371,12 @@ start_server() {
 }
 
 run_client() {
-  (cd "$ROOT_DIR" && JFS_RDMA_REQUIRE_DEVICE="$STRICT_DEVICE" go run -tags rdma "$TMP_DIR/client.go" "$ADDR")
+  skip_probe=false
+  if [ "$STRICT_DEVICE" = "true" ]; then
+    skip_probe=true
+  fi
+  client_device_index="${JFS_RDMA_SMOKE_CLIENT_DEVICE_INDEX:-${JFS_RDMA_DEVICE_INDEX:-0}}"
+  (cd "$ROOT_DIR" && JFS_RDMA_REQUIRE_DEVICE="$STRICT_DEVICE" JFS_RDMA_DEVICE_INDEX="$client_device_index" JFS_RDMA_SMOKE_SKIP_TCP_PROBE="$skip_probe" go run -tags rdma "$TMP_DIR/client.go" "$ADDR")
 }
 
 mkdir -p "$TMP_DIR"
