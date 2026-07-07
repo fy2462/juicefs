@@ -58,6 +58,29 @@ The important failure behavior is:
 - If all L2 nodes are unavailable, reads fall back to L1 and then L3.
 - If both L2 and L3 are unavailable and L1 is empty, the read fails.
 
+## Failure Metadata Model
+
+JuiceFS authoritative metadata remains in the configured metadata engine, and
+the authoritative data copy remains in L3 object storage. The RDMA remote cache
+layer is not a metadata owner and does not participate in inode, slice, or
+object naming decisions. L2 cache entries are disposable copies addressed by the
+same block keys that can be reloaded from L3.
+
+When a single RDMA/L2 node fails, clients count dial, handshake, send/recv, CQ
+timeout, and protocol errors as remote cache node failures. After
+`--remote-cache-fail-threshold`, the health manager skips that node during
+`--remote-cache-node-cooldown`. Reads then try other selected L2 replicas; if no
+healthy L2 replica is usable, the read falls through to L1+L3. This does not require metadata repair because the failed node never holds authoritative metadata
+or the only authoritative data copy.
+
+Recovery is also cache-local. Active probes run at
+`--remote-cache-probe-interval`; when a probe succeeds, the active probe marks the node recovered and it re-enters replica selection. A recovered node may be
+empty, stale, or partially warm. Misses simply refill from L3 or from normal
+future reads, and deletes are best-effort against L2 because L3 plus JuiceFS
+metadata define whether an object is live. If L3 is down at the same time and
+the requested block is absent from L1 and all healthy L2 replicas, reads fail
+instead of inventing metadata state.
+
 Use native RDMA transport for the current `rdma` tagged build:
 
 ```sh

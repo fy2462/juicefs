@@ -18,4 +18,6 @@ grep -F "three-tier-rustfs:" "$workflow" >/dev/null ||
 grep -F "make test.three-tier-cache-rustfs" "$workflow" >/dev/null ||
   fail "rdma-cache workflow does not run the RustFS three-tier smoke"
 
+"$ROOT_DIR/hack/rdma-cache-runbook-test.sh"
+
 echo "ok - rdma-cache workflow covers RustFS three-tier smoke"
