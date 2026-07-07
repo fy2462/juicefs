@@ -111,3 +111,37 @@ func TestConnectMovesQueuePairsToRTSWhenDeviceExists(t *testing.T) {
 	require.NoError(t, left.Connect(rightEndpoint))
 	require.NoError(t, right.Connect(leftEndpoint))
 }
+
+func TestSendRejectsOversizedPayload(t *testing.T) {
+	resources := &Resources{buffer: make([]byte, 4), maxFrameBytes: 4}
+
+	require.ErrorIs(t, resources.PostSend([]byte("too-large")), ErrFrameTooLarge)
+}
+
+func TestSendReceiveCompletesWhenDeviceExists(t *testing.T) {
+	count, err := DeviceCount()
+	require.NoError(t, err)
+	if count == 0 {
+		t.Skip("no RDMA devices available")
+	}
+
+	left, err := NewResources(0, 128<<10)
+	require.NoError(t, err)
+	defer left.Close()
+	right, err := NewResources(0, 128<<10)
+	require.NoError(t, err)
+	defer right.Close()
+
+	leftEndpoint, err := left.LocalEndpoint()
+	require.NoError(t, err)
+	rightEndpoint, err := right.LocalEndpoint()
+	require.NoError(t, err)
+	require.NoError(t, left.Connect(rightEndpoint))
+	require.NoError(t, right.Connect(leftEndpoint))
+
+	require.NoError(t, right.PostRecv())
+	require.NoError(t, left.PostSend([]byte("verbs-payload")))
+	require.NoError(t, left.PollCompletion())
+	require.NoError(t, right.PollCompletion())
+	require.Equal(t, []byte("verbs-payload"), right.Buffer()[:len("verbs-payload")])
+}

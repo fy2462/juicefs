@@ -27,6 +27,14 @@ package native
 static int jfs_ibv_query_port(struct ibv_context *context, uint8_t port_num, struct ibv_port_attr *port_attr) {
 	return ibv_query_port(context, port_num, port_attr);
 }
+
+static void jfs_set_send_wr_opcode(struct ibv_send_wr *wr) {
+	wr->opcode = IBV_WR_SEND;
+}
+
+static void jfs_set_send_wr_flags(struct ibv_send_wr *wr) {
+	wr->send_flags = IBV_SEND_SIGNALED;
+}
 */
 import "C"
 
@@ -178,6 +186,78 @@ func (r *Resources) Connect(remote Endpoint) error {
 	}
 	r.connected = true
 	return nil
+}
+
+func (r *Resources) Buffer() []byte {
+	if r == nil {
+		return nil
+	}
+	return r.buffer
+}
+
+func (r *Resources) PostRecv() error {
+	if r == nil || r.queuePair == nil || r.memoryRegion == nil || len(r.buffer) == 0 {
+		return ErrNoDevice
+	}
+	var sge C.struct_ibv_sge
+	sge.addr = C.uint64_t(uintptr(r.bufferPtr))
+	sge.length = C.uint32_t(len(r.buffer))
+	sge.lkey = r.memoryRegion.lkey
+	var wr C.struct_ibv_recv_wr
+	wr.wr_id = 1
+	wr.sg_list = &sge
+	wr.num_sge = 1
+	var bad *C.struct_ibv_recv_wr
+	if rc := C.ibv_post_recv(r.queuePair, &wr, &bad); rc != 0 {
+		return fmt.Errorf("post RDMA recv: %w", errnoError())
+	}
+	return nil
+}
+
+func (r *Resources) PostSend(payload []byte) error {
+	if r != nil && len(payload) > len(r.buffer) {
+		return ErrFrameTooLarge
+	}
+	if r == nil || r.queuePair == nil || r.memoryRegion == nil || len(r.buffer) == 0 {
+		return ErrNoDevice
+	}
+	copy(r.buffer, payload)
+	var sge C.struct_ibv_sge
+	sge.addr = C.uint64_t(uintptr(r.bufferPtr))
+	sge.length = C.uint32_t(len(payload))
+	sge.lkey = r.memoryRegion.lkey
+	var wr C.struct_ibv_send_wr
+	wr.wr_id = 2
+	wr.sg_list = &sge
+	wr.num_sge = 1
+	C.jfs_set_send_wr_opcode(&wr)
+	C.jfs_set_send_wr_flags(&wr)
+	var bad *C.struct_ibv_send_wr
+	if rc := C.ibv_post_send(r.queuePair, &wr, &bad); rc != 0 {
+		return fmt.Errorf("post RDMA send: %w", errnoError())
+	}
+	return nil
+}
+
+func (r *Resources) PollCompletion() error {
+	if r == nil || r.completionQueue == nil {
+		return ErrNoDevice
+	}
+	var wc C.struct_ibv_wc
+	for attempts := 0; attempts < 10000; attempts++ {
+		n := C.ibv_poll_cq(r.completionQueue, 1, &wc)
+		if n < 0 {
+			return fmt.Errorf("poll RDMA completion queue: %w", errnoError())
+		}
+		if n == 0 {
+			continue
+		}
+		if wc.status != C.IBV_WC_SUCCESS {
+			return fmt.Errorf("RDMA work completion failed with status %d", int(wc.status))
+		}
+		return nil
+	}
+	return fmt.Errorf("poll RDMA completion queue: timeout")
 }
 
 func DeviceCount() (int, error) {

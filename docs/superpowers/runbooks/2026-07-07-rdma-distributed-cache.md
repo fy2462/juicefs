@@ -123,10 +123,13 @@ The `rdma` build tag now compiles the native transport boundary, a libibverbs
 resource lifecycle that opens devices and allocates PD/CQ/MR buffers when an
 RDMA device is available, creates an RC QP, exports local endpoint metadata, and
 can exchange endpoint metadata between native client/server connections and move
-QPs through INIT/RTR/RTS. The data movement path is still the staged frame
-protocol used by the native smoke; the remaining production gap is replacing the
-framed TCP transfer with real verbs send/receive operations and completion
-handling.
+QPs through INIT/RTR/RTS. The native package also has minimal verbs
+`PostRecv`/`PostSend`/`PollCompletion` wrappers, with a device-backed send/recv
+test that runs when an ibverbs/open-rdma device exists. The data movement path
+used by the native smoke is still the staged frame protocol; the remaining
+production gap is wiring those verbs wrappers into the client/server frame
+exchange and removing the TCP data transfer fallback from the strict native
+path.
 
 ## Native Smoke And Stress
 

@@ -24,4 +24,5 @@ var (
 	ErrInvalidDeviceIndex = errors.New("invalid RDMA device index")
 	ErrNoDevice           = errors.New("RDMA device is not available")
 	ErrInvalidEndpoint    = errors.New("invalid RDMA endpoint")
+	ErrFrameTooLarge      = errors.New("RDMA frame exceeds registered buffer")
 )
