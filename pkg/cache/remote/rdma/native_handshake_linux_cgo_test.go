@@ -20,6 +20,8 @@ package rdma
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -98,29 +100,81 @@ func TestServeNativeConnRunsEndpointHandshakeWhenResourcesExist(t *testing.T) {
 	}()
 
 	require.NoError(t, clientNativeHandshake(context.Background(), clientConn, clientResource))
-	require.Equal(t, int32(0), serverResource.closes.Load())
-	payload, err := protocol.EncodeRequest(protocol.Request{Op: protocol.OpPing})
-	require.NoError(t, err)
-	frame, err := encodeFrame(payload, defaultRDMAFrameBytes)
-	require.NoError(t, err)
-	require.NoError(t, writeAll(clientConn, frame))
-	respFrame, err := readFrame(clientConn, defaultRDMAFrameBytes)
-	require.NoError(t, err)
-	resp, err := protocol.DecodeResponse(respFrame)
-	require.NoError(t, err)
-	require.Equal(t, protocol.StatusOK, resp.Status)
-	require.NoError(t, clientConn.Close())
 	<-done
 	require.Equal(t, serverResource.endpoint, clientResource.remote.Load().(native.Endpoint))
 	require.Equal(t, clientResource.endpoint, serverResource.remote.Load().(native.Endpoint))
 	require.Equal(t, int32(1), serverResource.closes.Load())
 }
 
+func TestServeNativeConnUsesResourceFrameExchange(t *testing.T) {
+	serverResource := newFakeNativeResource(2)
+	clientResource := newFakeNativeResource(1)
+	reqPayload, err := protocol.EncodeRequest(protocol.Request{Op: protocol.OpPing})
+	require.NoError(t, err)
+	reqFrame, err := encodeFrame(reqPayload, defaultRDMAFrameBytes)
+	require.NoError(t, err)
+	serverResource.queueReceived(reqFrame)
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		serveNativeConnWithResourceFactory(context.Background(), serverConn, NewServer(mock.NewClient()), defaultRDMAFrameBytes, fakeNativeResourceFactory{resource: serverResource})
+	}()
+
+	require.NoError(t, clientNativeHandshake(context.Background(), clientConn, clientResource))
+	<-done
+	require.Equal(t, int32(1), serverResource.postRecvs.Load())
+	require.Equal(t, int32(1), serverResource.postSends.Load())
+	require.Equal(t, int32(2), serverResource.polls.Load())
+	require.Len(t, serverResource.sentPayloads, 1)
+	respPayload, err := readPayloadFromEncodedFrame(serverResource.sentPayloads[0])
+	require.NoError(t, err)
+	resp, err := protocol.DecodeResponse(respPayload)
+	require.NoError(t, err)
+	require.Equal(t, protocol.StatusOK, resp.Status)
+}
+
+func TestNativeConnRoundTripUsesResourceFrameExchange(t *testing.T) {
+	resource := newFakeNativeResource(1)
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	resource.onSend = func(payload []byte) {
+		reqPayload, err := readPayloadFromEncodedFrame(payload)
+		require.NoError(t, err)
+		respPayload, err := NewServer(mock.NewClient()).HandleFrame(context.Background(), reqPayload)
+		require.NoError(t, err)
+		respFrame, err := encodeFrame(respPayload, defaultRDMAFrameBytes)
+		require.NoError(t, err)
+		resource.queueReceived(respFrame)
+	}
+	conn := &nativeConn{
+		conn:          clientConn,
+		resources:     resource,
+		maxFrameBytes: defaultRDMAFrameBytes,
+	}
+
+	resp, err := conn.RoundTrip(context.Background(), protocol.Request{Op: protocol.OpPing})
+	require.NoError(t, err)
+	require.Equal(t, protocol.StatusOK, resp.Status)
+	require.Equal(t, int32(1), resource.postRecvs.Load())
+	require.Equal(t, int32(1), resource.postSends.Load())
+	require.Equal(t, int32(2), resource.polls.Load())
+}
+
 type fakeNativeResource struct {
-	endpoint native.Endpoint
-	remote   atomic.Value
-	connects atomic.Int32
-	closes   atomic.Int32
+	endpoint     native.Endpoint
+	remote       atomic.Value
+	connects     atomic.Int32
+	closes       atomic.Int32
+	postRecvs    atomic.Int32
+	postSends    atomic.Int32
+	polls        atomic.Int32
+	buffer       []byte
+	recvSizes    []int
+	sentPayloads [][]byte
+	onSend       func([]byte)
 }
 
 func newFakeNativeResource(id uint32) *fakeNativeResource {
@@ -131,7 +185,7 @@ func newFakeNativeResource(id uint32) *fakeNativeResource {
 		RKey:  id + 300,
 		VAddr: uint64(id + 400),
 		Port:  1,
-	}}
+	}, buffer: make([]byte, defaultRDMAFrameBytes)}
 }
 
 func (r *fakeNativeResource) LocalEndpoint() (native.Endpoint, error) {
@@ -149,6 +203,42 @@ func (r *fakeNativeResource) Close() error {
 	return nil
 }
 
+func (r *fakeNativeResource) Buffer() []byte {
+	return r.buffer
+}
+
+func (r *fakeNativeResource) PostRecv() error {
+	r.postRecvs.Add(1)
+	return nil
+}
+
+func (r *fakeNativeResource) PostSend(payload []byte) error {
+	r.postSends.Add(1)
+	r.recvSizes = append(r.recvSizes, 0)
+	data := make([]byte, len(payload))
+	copy(data, payload)
+	r.sentPayloads = append(r.sentPayloads, data)
+	if r.onSend != nil {
+		r.onSend(data)
+	}
+	return nil
+}
+
+func (r *fakeNativeResource) PollCompletion() (int, error) {
+	r.polls.Add(1)
+	if len(r.recvSizes) == 0 {
+		return 0, errors.New("no fake RDMA completion")
+	}
+	size := r.recvSizes[0]
+	r.recvSizes = r.recvSizes[1:]
+	return size, nil
+}
+
+func (r *fakeNativeResource) queueReceived(payload []byte) {
+	copy(r.buffer, payload)
+	r.recvSizes = append(r.recvSizes, len(payload))
+}
+
 type fakeNativeResourceFactory struct {
 	resource nativeResource
 	err      error
@@ -156,4 +246,22 @@ type fakeNativeResourceFactory struct {
 
 func (f fakeNativeResourceFactory) New(deviceIndex, maxFrameBytes int) (nativeResource, error) {
 	return f.resource, f.err
+}
+
+func readPayloadFromEncodedFrame(frame []byte) ([]byte, error) {
+	conn := bytesConn{data: frame}
+	return readFrame(&conn, defaultRDMAFrameBytes)
+}
+
+type bytesConn struct {
+	data []byte
+}
+
+func (c *bytesConn) Read(p []byte) (int, error) {
+	if len(c.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, c.data)
+	c.data = c.data[n:]
+	return n, nil
 }

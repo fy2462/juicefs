@@ -126,10 +126,12 @@ can exchange endpoint metadata between native client/server connections and move
 QPs through INIT/RTR/RTS. The native package also has minimal verbs
 `PostRecv`/`PostSend`/`PollCompletion` wrappers, with a device-backed send/recv
 test that runs when an ibverbs/open-rdma device exists. The data movement path
-used by the native smoke is still the staged frame protocol; the remaining
-production gap is wiring those verbs wrappers into the client/server frame
-exchange and removing the TCP data transfer fallback from the strict native
-path.
+has a resource-backed frame exchange path on both client and server when native
+resources exist. The default native smoke can still fall back to the staged TCP
+frame path when no RDMA device exists; the remaining production gap is making
+the server resource path a full connection loop and adding a strict native smoke
+that sets `JFS_RDMA_REQUIRE_DEVICE=true` to prove payloads travel through verbs
+instead of TCP fallback.
 
 ## Native Smoke And Stress
 

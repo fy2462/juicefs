@@ -19,6 +19,7 @@
 package rdma
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -67,6 +68,10 @@ type nativeEndpointWire struct {
 type nativeResource interface {
 	LocalEndpoint() (native.Endpoint, error)
 	Connect(native.Endpoint) error
+	Buffer() []byte
+	PostRecv() error
+	PostSend([]byte) error
+	PollCompletion() (int, error)
 	Close() error
 }
 
@@ -220,6 +225,26 @@ func (c *nativeConn) RoundTrip(ctx context.Context, req protocol.Request) (proto
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.resources != nil {
+		if err := c.resources.PostRecv(); err != nil {
+			return protocol.Response{}, err
+		}
+		if err := c.resources.PostSend(frame); err != nil {
+			return protocol.Response{}, err
+		}
+		if _, err := c.resources.PollCompletion(); err != nil {
+			return protocol.Response{}, err
+		}
+		n, err := c.resources.PollCompletion()
+		if err != nil {
+			return protocol.Response{}, err
+		}
+		respFrame, err := readFrame(bytes.NewReader(c.resources.Buffer()[:n]), c.maxFrameBytes)
+		if err != nil {
+			return protocol.Response{}, err
+		}
+		return protocol.DecodeResponse(respFrame)
+	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = c.conn.SetDeadline(deadline)
 		defer c.conn.SetDeadline(time.Time{})
@@ -348,6 +373,8 @@ func serveNativeConnWithResourceFactory(ctx context.Context, conn net.Conn, serv
 		if err := serverNativeHandshake(ctx, conn, resources); err != nil {
 			return
 		}
+		_ = serveNativeResourceFrame(ctx, resources, server, maxFrameBytes)
+		return
 	} else if !errors.Is(err, native.ErrNoDevice) {
 		return
 	}
@@ -381,6 +408,36 @@ func serveNativeConnWithResourceFactory(ctx context.Context, conn net.Conn, serv
 			return
 		}
 	}
+}
+
+func serveNativeResourceFrame(ctx context.Context, resources nativeResource, server *Server, maxFrameBytes int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := resources.PostRecv(); err != nil {
+		return err
+	}
+	n, err := resources.PollCompletion()
+	if err != nil {
+		return err
+	}
+	reqFrame, err := readFrame(bytes.NewReader(resources.Buffer()[:n]), maxFrameBytes)
+	if err != nil {
+		return err
+	}
+	respFrame, err := server.HandleFrame(ctx, reqFrame)
+	if err != nil {
+		return err
+	}
+	frame, err := encodeFrame(respFrame, maxFrameBytes)
+	if err != nil {
+		return err
+	}
+	if err := resources.PostSend(frame); err != nil {
+		return err
+	}
+	_, err = resources.PollCompletion()
+	return err
 }
 
 func (ibverbsResourceFactory) New(deviceIndex, maxFrameBytes int) (nativeResource, error) {
