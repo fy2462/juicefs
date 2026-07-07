@@ -126,6 +126,9 @@ test.fdb:
 test.three-tier-cache-rustfs:
 	./hack/three-tier-cache-rustfs-test.sh
 
+test.rdma-compose-three-node:
+	./hack/rdma-compose-three-node-test.sh
+
 test.rdma-native-smoke:
 	./hack/rdma-native-smoke-test.sh
 

@@ -1,0 +1,84 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    command: ["server", "--address", ":9000", "/data"]
+    environment:
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+      MINIO_ROOT_USER: rustfsadmin
+      MINIO_ROOT_PASSWORD: rustfsadmin
+    volumes:
+      - rustfs-data:/data
+
+  l2-node-1:
+    build:
+      context: .
+    depends_on:
+      - redis
+      - rustfs
+    command:
+      - /usr/local/bin/juicefs
+      - rdma-cache-server
+      - --listen
+      - 0.0.0.0:9568
+      - --transport
+      - http
+      - --cache-dir
+      - /cache
+      - --cache-size
+      - 64M
+    volumes:
+      - ../../juicefs:/usr/local/bin/juicefs:ro
+      - l2-node-1-cache:/cache
+
+  l2-node-2:
+    build:
+      context: .
+    depends_on:
+      - redis
+      - rustfs
+    command:
+      - /usr/local/bin/juicefs
+      - rdma-cache-server
+      - --listen
+      - 0.0.0.0:9568
+      - --transport
+      - http
+      - --cache-dir
+      - /cache
+      - --cache-size
+      - 64M
+    volumes:
+      - ../../juicefs:/usr/local/bin/juicefs:ro
+      - l2-node-2-cache:/cache
+
+  client-node:
+    build:
+      context: .
+    depends_on:
+      - redis
+      - rustfs
+      - l2-node-1
+      - l2-node-2
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse:/dev/fuse
+    security_opt:
+      - apparmor:unconfined
+    command: ["sleep", "infinity"]
+    volumes:
+      - ../../juicefs:/usr/local/bin/juicefs:ro
+      - ../..:/work:ro
+      - l2-node-1-cache:/l2-node-1-cache:ro
+      - l2-node-2-cache:/l2-node-2-cache:ro
+
+volumes:
+  rustfs-data:
+  l2-node-1-cache:
+  l2-node-2-cache:

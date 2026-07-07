@@ -21,6 +21,12 @@ grep -F "hack/rdma-cache-stress.sh" "$workflow" >/dev/null ||
 grep -F "hack/rdma-cache-stress-test.sh" "$workflow" >/dev/null ||
   fail "rdma-cache workflow does not trigger on the stress guard script"
 
+grep -F "hack/rdma-compose-three-node-test-test.sh" "$workflow" >/dev/null ||
+  fail "rdma-cache workflow does not trigger on the compose three-node guard script"
+
+grep -F "./hack/rdma-compose-three-node-test-test.sh" "$workflow" >/dev/null ||
+  fail "rdma-cache workflow does not run the compose three-node guard script"
+
 grep -F "./hack/rdma-cache-stress-test.sh" "$workflow" >/dev/null ||
   fail "rdma-cache workflow does not run the stress guard script"
 

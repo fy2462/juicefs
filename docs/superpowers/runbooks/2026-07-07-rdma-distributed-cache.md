@@ -194,6 +194,19 @@ OPEN_RDMA_DRIVER=/media/psf/Home/github/PFS/open-rdma-driver \
 make test.rdma-native-mounted-mock
 ```
 
+Run a Docker Compose distributed topology with independent `client-node`,
+`l2-node-1`, and `l2-node-2` containers plus Redis and RustFS services:
+
+```sh
+make test.rdma-compose-three-node
+```
+
+This compose smoke uses the HTTP remote-cache transport to validate real
+container-level node identity, one-L2-node failure, all-L2-down L1+L3 fallback,
+and L2+L3-down failure. The native RDMA data path remains covered by the
+open-rdma mock mounted smoke targets because the mock verbs provider depends on
+host RDMA mock setup rather than ordinary Docker bridge networking.
+
 Run mounted native RDMA L2 failover with two L2 nodes, single-node L2 failure,
 all-L2-down L1+L3 fallback, and L2+L3-down failure:
 

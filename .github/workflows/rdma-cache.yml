@@ -15,6 +15,9 @@ on:
       - 'hack/rdma-cache-stress-test.sh'
       - 'hack/rdma-cache-runbook-test.sh'
       - 'hack/rdma-cache-workflow-test.sh'
+      - 'hack/rdma-compose/**'
+      - 'hack/rdma-compose-three-node-test.sh'
+      - 'hack/rdma-compose-three-node-test-test.sh'
       - 'hack/rdma-*-smoke-test.sh'
       - 'hack/rdma-native-smoke-test-test.sh'
       - 'hack/rdma-native-mounted-smoke-test-test.sh'
@@ -37,6 +40,9 @@ on:
       - 'hack/rdma-cache-stress-test.sh'
       - 'hack/rdma-cache-runbook-test.sh'
       - 'hack/rdma-cache-workflow-test.sh'
+      - 'hack/rdma-compose/**'
+      - 'hack/rdma-compose-three-node-test.sh'
+      - 'hack/rdma-compose-three-node-test-test.sh'
       - 'hack/rdma-*-smoke-test.sh'
       - 'hack/rdma-native-smoke-test-test.sh'
       - 'hack/rdma-native-mounted-smoke-test-test.sh'
@@ -78,6 +84,7 @@ jobs:
         run: |
           ./hack/rdma-cache-workflow-test.sh
           ./hack/rdma-cache-stress-test.sh
+          ./hack/rdma-compose-three-node-test-test.sh
           ./hack/three-tier-cache-rustfs-test-test.sh
           ./hack/rdma-native-smoke-test-test.sh
           ./hack/rdma-native-mounted-smoke-test-test.sh
