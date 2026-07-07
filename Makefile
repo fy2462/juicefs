@@ -129,6 +129,9 @@ test.three-tier-cache-rustfs:
 test.rdma-compose-three-node:
 	./hack/rdma-compose-three-node-test.sh
 
+test.rdma-compose-three-node-perf:
+	./hack/rdma-compose-three-node-perf-test.sh
+
 test.rdma-native-smoke:
 	./hack/rdma-native-smoke-test.sh
 

@@ -269,6 +269,142 @@ read_l2_l3_down_fails() {
   echo "ok - docker compose three-node read fails when L2 and L3 are unavailable"
 }
 
+measure_read() {
+  label="$1"
+  file="$2"
+  bytes="$3"
+  start_ns="$(date +%s%N)"
+  cat "$MNT/$file" >/dev/null
+  end_ns="$(date +%s%N)"
+  elapsed_ms="$(awk -v start="$start_ns" -v end="$end_ns" 'BEGIN { printf "%.3f", (end - start) / 1000000 }')"
+  mbps="$(awk -v bytes="$bytes" -v start="$start_ns" -v end="$end_ns" 'BEGIN {
+    seconds = (end - start) / 1000000000
+    if (seconds <= 0) {
+      printf "0.00"
+    } else {
+      printf "%.2f", (bytes / 1048576) / seconds
+    }
+  }')"
+  printf '%s|%s|%s|%s\n' "$label" "$bytes" "$elapsed_ms" "$mbps"
+}
+
+print_result_row() {
+  result="$1"
+  remote_hits_delta="$2"
+  IFS='|' read -r label bytes elapsed_ms mbps <<EOF
+$result
+EOF
+  printf '| %s | %s | %s | %s | %s |\n' "$label" "$bytes" "$elapsed_ms" "$mbps" "$remote_hits_delta"
+}
+
+metric_delta() {
+  after="$1"
+  before="$2"
+  awk -v after="$after" -v before="$before" 'BEGIN { printf "%.0f", after - before }'
+}
+
+performance_report() {
+  PERF_MB="${JFS_RDMA_COMPOSE_PERF_MB:-32}"
+  PERF_FILE="perf.bin"
+  PERF_BYTES=$((PERF_MB * 1048576))
+
+  rm -rf "$ROOT"
+  mkdir -p "$MNT"
+  wait_for_redis
+  wait_for_http rustfs 9000
+  wait_for_http l2-node-1 9568
+  wait_for_http l2-node-2 9568
+  redis-cli -h redis -n 15 FLUSHDB >/dev/null
+  juicefs format \
+    --storage s3 \
+    --bucket "$BUCKET_URL" \
+    --access-key "$ACCESS_KEY" \
+    --secret-key "$SECRET_KEY" \
+    --compress none \
+    --trash-days 0 \
+    "$META_URL" compose-three-node-perf >/dev/null
+
+  mount_without_remote_cache "$ROOT/l1-perf-writer"
+  dd if=/dev/zero of="$MNT/$PERF_FILE" bs=1M count="$PERF_MB" status=none
+  sync
+  unmount_jfs "$MNT" "$MOUNT_PID"
+
+  mount_without_remote_cache "$ROOT/l1-perf-l3-cold"
+  l3_result="$(measure_read "L3 cold read" "$PERF_FILE" "$PERF_BYTES")"
+  unmount_jfs "$MNT" "$MOUNT_PID"
+
+  mount_with_remote_cache "$ROOT/l1-perf-fill-l2" "l2-node-1:9568,l2-node-2:9568" 2
+  cat "$MNT/$PERF_FILE" >/dev/null
+  wait_for_l2_entries /l2-node-1-cache
+  wait_for_l2_entries /l2-node-2-cache
+  unmount_jfs "$MNT" "$MOUNT_PID"
+
+  METRICS_PORT=9574
+  mount_with_remote_cache "$ROOT/l1-perf-l2-hot" "l2-node-1:9568,l2-node-2:9568" 2
+  l2_hit_before="$(metric_value "$METRICS_PORT" "juicefs_remote_cache_gets_total" 'result="hit"')"
+  l2_result="$(measure_read "L2 hot read" "$PERF_FILE" "$PERF_BYTES")"
+  l2_hit_after="$(metric_value "$METRICS_PORT" "juicefs_remote_cache_gets_total" 'result="hit"')"
+  l2_hits_delta="$(metric_delta "$l2_hit_after" "$l2_hit_before")"
+  unmount_jfs "$MNT" "$MOUNT_PID"
+  METRICS_PORT=
+
+  METRICS_PORT=9575
+  mount_with_remote_cache "$ROOT/l1-perf-l1-hot" "l2-node-1:9568,l2-node-2:9568" 2
+  cat "$MNT/$PERF_FILE" >/dev/null
+  l1_hit_before="$(metric_value "$METRICS_PORT" "juicefs_remote_cache_gets_total" 'result="hit"')"
+  l1_result="$(measure_read "L1 hot read" "$PERF_FILE" "$PERF_BYTES")"
+  l1_hit_after="$(metric_value "$METRICS_PORT" "juicefs_remote_cache_gets_total" 'result="hit"')"
+  l1_hits_delta="$(metric_delta "$l1_hit_after" "$l1_hit_before")"
+  unmount_jfs "$MNT" "$MOUNT_PID"
+  METRICS_PORT=
+
+  cat <<EOF
+# L1/L2/L3 3-Node Cache Performance
+
+Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+## Topology
+
+- Client: \`client-node\`
+- L1: per-client local disk cache under \`$ROOT\`
+- L2: two remote cache servers, \`l2-node-1:9568\` and \`l2-node-2:9568\`
+- L3: RustFS S3-compatible object storage at \`$BUCKET_URL\`
+- Metadata: Redis at \`$META_URL\`
+- L2 transport: HTTP remote-cache transport inside Docker Compose
+
+This report measures the three-tier cache behavior in a 3-node compose topology.
+It is not a real RDMA hardware throughput report; native RDMA performance still
+requires a host with real RDMA devices or an open-rdma mock environment.
+
+## Parameters
+
+- Payload: \`$PERF_MB MiB\` (\`$PERF_BYTES\` bytes)
+- Remote cache replicas: \`2\`
+- L1 cache size: \`64 MiB\`
+- Remote cache metric used for L2 proof: \`juicefs_remote_cache_gets_total{result="hit"}\`
+
+## Results
+
+| Path | Bytes | Elapsed ms | Throughput MiB/s | remote_hits_delta |
+| --- | ---: | ---: | ---: | ---: |
+EOF
+  print_result_row "$l3_result" "n/a"
+  print_result_row "$l2_result" "$l2_hits_delta"
+  print_result_row "$l1_result" "$l1_hits_delta"
+  cat <<EOF
+
+## Interpretation
+
+- L3 cold read uses a fresh L1 cache and no remote cache, so data is served from
+  RustFS through the object storage path.
+- L2 hot read uses a fresh L1 cache after the remote cache has been warmed. A
+  positive \`remote_hits_delta\` proves the read used L2.
+- L1 hot read repeats the read on the same mounted client after the local cache
+  is warm. A zero or near-zero \`remote_hits_delta\` means the second read stayed
+  local.
+EOF
+}
+
 case "${1:-}" in
   prepare)
     prepare
@@ -285,8 +421,11 @@ case "${1:-}" in
   read-l2-l3-down-fails)
     read_l2_l3_down_fails
     ;;
+  performance-report)
+    performance_report
+    ;;
   *)
-    echo "usage: $0 prepare|read-node-health-fallback|read-surviving-l2|read-l3-fallback|read-l2-l3-down-fails" >&2
+    echo "usage: $0 prepare|read-node-health-fallback|read-surviving-l2|read-l3-fallback|read-l2-l3-down-fails|performance-report" >&2
     exit 2
     ;;
 esac

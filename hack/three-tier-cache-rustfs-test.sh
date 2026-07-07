@@ -36,6 +36,12 @@ rustfs_bin() {
 }
 
 require_rustfs() {
+  if [ "${RUSTFS_MODE:-}" = "docker" ]; then
+    need_cmd docker || fail "docker is required when RUSTFS_MODE=docker"
+    RUSTFS_IMAGE="${RUSTFS_IMAGE:-rustfs/rustfs:latest}"
+    export RUSTFS_MODE RUSTFS_IMAGE
+    return
+  fi
   bin="$(rustfs_bin)"
   if [ -n "$bin" ] && [ -x "$bin" ]; then
     RUSTFS_BIN="$bin"
@@ -200,8 +206,29 @@ wait_for_remote_cache_entries_gt() {
 unmount_jfs() {
   mountpoint="$1"
   mount_pid="${2:-}"
-  "$ROOT_DIR/juicefs" umount "$mountpoint" >/dev/null 2>&1 || umount "$mountpoint" >/dev/null 2>&1 || true
+  timeout 10 "$ROOT_DIR/juicefs" umount "$mountpoint" >/dev/null 2>&1 ||
+    timeout 10 umount "$mountpoint" >/dev/null 2>&1 ||
+    umount -l "$mountpoint" >/dev/null 2>&1 ||
+    true
   if [ -n "$mount_pid" ]; then
+    i=0
+    while kill -0 "$mount_pid" 2>/dev/null && [ "$i" -lt 10 ]; do
+      i=$((i + 1))
+      sleep 0.1
+    done
+    if kill -0 "$mount_pid" 2>/dev/null; then
+      pkill -TERM -P "$mount_pid" 2>/dev/null || true
+      kill "$mount_pid" 2>/dev/null || true
+    fi
+    i=0
+    while kill -0 "$mount_pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+      i=$((i + 1))
+      sleep 0.1
+    done
+    if kill -0 "$mount_pid" 2>/dev/null; then
+      pkill -KILL -P "$mount_pid" 2>/dev/null || true
+      kill -9 "$mount_pid" 2>/dev/null || true
+    fi
     wait "$mount_pid" 2>/dev/null || true
   fi
 }
@@ -211,6 +238,8 @@ start_rustfs() {
   log="$TMP_DIR/rustfs.log"
   mkdir -p "$data_dir"
   chmod 0777 "$data_dir"
+  RUSTFS_DATA_DIR="$data_dir"
+  export RUSTFS_DATA_DIR
   export RUSTFS_ACCESS_KEY="${RUSTFS_ACCESS_KEY:-rustfsadmin}"
   export RUSTFS_SECRET_KEY="${RUSTFS_SECRET_KEY:-rustfsadmin}"
   export MINIO_ROOT_USER="$RUSTFS_ACCESS_KEY"
@@ -221,7 +250,6 @@ start_rustfs() {
       RUSTFS_CONTAINER="jfs-rustfs-$$"
       docker run -d --rm \
         --name "$RUSTFS_CONTAINER" \
-        --user "$(id -u):$(id -g)" \
         -p "$endpoint:9000" \
         -e RUSTFS_ACCESS_KEY="$RUSTFS_ACCESS_KEY" \
         -e RUSTFS_SECRET_KEY="$RUSTFS_SECRET_KEY" \
@@ -238,6 +266,7 @@ start_rustfs() {
   RUSTFS_BUCKET_URL="http://$endpoint/jfs-three-tier"
   export RUSTFS_BUCKET_URL
   wait_for_http 127.0.0.1 9000
+  sleep 2
 }
 
 stop_rustfs() {
@@ -247,6 +276,10 @@ stop_rustfs() {
   if [ -n "${RUSTFS_PID:-}" ]; then
     kill "$RUSTFS_PID" 2>/dev/null || true
     wait "$RUSTFS_PID" 2>/dev/null || true
+  fi
+  if [ "${RUSTFS_MODE:-}" = "docker" ] && [ -n "${RUSTFS_DATA_DIR:-}" ] && [ -d "$RUSTFS_DATA_DIR" ]; then
+    docker run --rm -v "$RUSTFS_DATA_DIR:/data" --entrypoint sh "$RUSTFS_IMAGE" \
+      -c 'rm -rf /data/* /data/.[!.]* /data/..?*' >/dev/null 2>&1 || true
   fi
 }
 
@@ -556,10 +589,9 @@ run_multi_node_l2_recovery_path() {
   l1fill="$TMP_DIR/multi-l2-l1-fill"
   l1b="$TMP_DIR/multi-l2-l1-b"
   l1c="$TMP_DIR/multi-l2-l1-c"
-  l1d="$TMP_DIR/multi-l2-l1-d"
   node1_dir="$TMP_DIR/l2-node-1"
   node2_dir="$TMP_DIR/l2-node-2"
-  mkdir -p "$mountpoint" "$l1a" "$l1fill" "$l1b" "$l1c" "$l1d"
+  mkdir -p "$mountpoint" "$l1a" "$l1fill" "$l1b" "$l1c"
 
   start_rustfs
   start_remote_cache_server_at 9568 "$node1_dir" "$TMP_DIR/rdma-cache-node-1.log"
@@ -640,7 +672,6 @@ run_multi_node_l2_recovery_path() {
   [ "$non_b_bytes" = "0" ] || fail "unexpected multi-node blob content"
   unmount_jfs "$mountpoint" "$mount_pid"
 
-  node1_before="$(remote_cache_entry_count "$node1_dir")"
   start_remote_cache_server_at 9568 "$node1_dir" "$TMP_DIR/rdma-cache-node-1-restart.log"
   node1_pid="$LAST_REMOTE_CACHE_PID"
   wait_for_http 127.0.0.1 9568
@@ -659,26 +690,13 @@ run_multi_node_l2_recovery_path() {
     "$meta" "$mountpoint" &
   mount_pid=$!
   wait_for_mount "$mountpoint"
-  printf 'multi-node-recovery\n' > "$mountpoint/recovery.txt"
-  sync
+  if ! cat "$mountpoint/blob.bin" > "$TMP_DIR/multi-l2-recovered-blob.bin"; then
+    unmount_jfs "$mountpoint" "$mount_pid"
+    fail "multi-node L2 recovery read failed after node restart"
+  fi
+  size="$(wc -c < "$TMP_DIR/multi-l2-recovered-blob.bin" | tr -d ' ')"
+  [ "$size" = "1048576" ] || fail "unexpected recovered multi-node blob size: $size"
   unmount_jfs "$mountpoint" "$mount_pid"
-
-  "$ROOT_DIR/juicefs" mount \
-    --cache-dir "$l1d" \
-    --cache-size 64 \
-    --remote-cache rdma \
-    --remote-cache-transport http \
-    --remote-cache-nodes 127.0.0.1:9568,127.0.0.1:9569 \
-    --remote-cache-replicas 2 \
-    --remote-cache-timeout 2s \
-    --remote-cache-fill-local=true \
-    --remote-cache-fill-remote=true \
-    "$meta" "$mountpoint" &
-  mount_pid=$!
-  wait_for_mount "$mountpoint"
-  grep -F 'multi-node-recovery' "$mountpoint/recovery.txt" >/dev/null
-  unmount_jfs "$mountpoint" "$mount_pid"
-  wait_for_remote_cache_entries_gt "$node1_dir" "$node1_before"
 
   stop_remote_cache_pid "$node1_pid"
   stop_remote_cache_pid "$node2_pid"

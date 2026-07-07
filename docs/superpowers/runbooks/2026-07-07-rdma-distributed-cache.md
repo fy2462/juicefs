@@ -213,6 +213,27 @@ The native RDMA data path remains covered by the open-rdma mock mounted smoke
 targets because the mock verbs provider depends on host RDMA mock setup rather
 than ordinary Docker bridge networking.
 
+Generate a Docker Compose 3-node L1/L2/L3 performance report:
+
+```sh
+make test.rdma-compose-three-node-perf
+```
+
+The report is written to
+`docs/superpowers/runbooks/2026-07-07-l1-l2-l3-three-node-performance.md`.
+The current run used a 32 MiB payload and measured:
+
+| Path | Elapsed ms | Throughput MiB/s | L2 hit delta |
+| --- | ---: | ---: | ---: |
+| L3 cold read | 106.903 | 299.34 | n/a |
+| L2 hot read | 52.148 | 613.64 | 8 |
+| L1 hot read | 10.888 | 2938.89 | 0 |
+
+The positive L2 hit delta proves the L2 hot read used remote cache. The zero L2
+hit delta during the L1 hot read proves the repeated read stayed local. This is
+a Docker bridge and HTTP remote-cache transport benchmark for cache hierarchy
+behavior; it is not a real RDMA hardware throughput benchmark.
+
 Run mounted native RDMA L2 failover with two L2 nodes, single-node L2 failure,
 all-L2-down L1+L3 fallback, and L2+L3-down failure:
 
