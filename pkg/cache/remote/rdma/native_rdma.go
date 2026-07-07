@@ -18,16 +18,64 @@
 
 package rdma
 
-import "github.com/juicedata/juicefs/pkg/cache/remote"
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/juicedata/juicefs/pkg/cache/remote"
+)
 
 func NewClient(options Options) remote.Client {
 	return newClient(options)
 }
 
 func Capability() CapabilityInfo {
+	driverDir := os.Getenv("OPEN_RDMA_DRIVER")
+	if driverDir == "" {
+		return CapabilityInfo{
+			Built:     true,
+			Available: false,
+			Reason:    "OPEN_RDMA_DRIVER is not set; run hack/open-rdma-smoke-test.sh --driver-dir /path/to/open-rdma-driver",
+		}
+	}
+	if err := checkOpenRDMADriverDir(driverDir); err != nil {
+		return CapabilityInfo{
+			Built:     true,
+			Available: false,
+			Reason:    err.Error(),
+		}
+	}
 	return CapabilityInfo{
 		Built:     true,
-		Available: false,
-		Reason:    "native RDMA implementation is not available yet",
+		Available: true,
+		Reason:    fmt.Sprintf("open-rdma checkout ready: %s", driverDir),
 	}
+}
+
+func checkOpenRDMADriverDir(driverDir string) error {
+	requiredDirs := []string{
+		"dtld-ibverbs",
+		"examples",
+		"scripts",
+	}
+	for _, name := range requiredDirs {
+		path := filepath.Join(driverDir, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("open-rdma checkout missing %s: %w", path, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("open-rdma checkout path is not a directory: %s", path)
+		}
+	}
+	setup := filepath.Join(driverDir, "scripts", "setup-env.sh")
+	info, err := os.Stat(setup)
+	if err != nil {
+		return fmt.Errorf("open-rdma checkout missing %s: %w", setup, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("open-rdma setup path is a directory: %s", setup)
+	}
+	return nil
 }
