@@ -47,6 +47,7 @@ type Options struct {
 	NodeCooldown  time.Duration
 	ProbeInterval time.Duration
 	ProbeTimeout  time.Duration
+	Observer      cluster.Observer
 }
 
 func NewClient(nodes []string, timeout time.Duration) remote.Client {
@@ -68,13 +69,13 @@ func NewClientWithOptions(options Options) remote.Client {
 	return &Client{
 		nodes:      nodes,
 		placement:  cluster.NewPlacement(nodes, options.Replicas),
-		health:     cluster.NewHealth(cluster.Options{FailThreshold: options.FailThreshold, Cooldown: options.NodeCooldown}),
+		health:     cluster.NewHealth(cluster.Options{FailThreshold: options.FailThreshold, Cooldown: options.NodeCooldown, Observer: options.Observer}),
 		httpClient: &http.Client{Timeout: options.Timeout},
 	}
 }
 
 func (c *Client) Get(ctx context.Context, key string, off, size int) (io.ReadCloser, error) {
-	nodes, err := c.replicaNodes(key)
+	nodes, err := c.replicaNodes(key, "get")
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +122,7 @@ func (c *Client) Get(ctx context.Context, key string, off, size int) (io.ReadClo
 }
 
 func (c *Client) Put(ctx context.Context, key string, data []byte) error {
-	nodes, err := c.replicaNodes(key)
+	nodes, err := c.replicaNodes(key, "put")
 	if err != nil {
 		return err
 	}
@@ -152,7 +153,7 @@ func (c *Client) Put(ctx context.Context, key string, data []byte) error {
 }
 
 func (c *Client) Delete(ctx context.Context, key string) error {
-	nodes, err := c.replicaNodes(key)
+	nodes, err := c.replicaNodes(key, "delete")
 	if err != nil {
 		return err
 	}
@@ -186,11 +187,11 @@ func (c *Client) Close() error {
 	return nil
 }
 
-func (c *Client) replicaNodes(key string) ([]string, error) {
+func (c *Client) replicaNodes(key, op string) ([]string, error) {
 	if len(c.nodes) == 0 {
 		return nil, remote.ErrDisabled
 	}
-	nodes := c.health.Available(c.placement.Candidates(key))
+	nodes := c.health.AvailableForOp(c.placement.Candidates(key), op)
 	if len(nodes) == 0 {
 		return nil, remote.ErrUnavailable
 	}

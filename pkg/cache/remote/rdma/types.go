@@ -46,6 +46,7 @@ type Options struct {
 	NodeCooldown  time.Duration
 	ProbeInterval time.Duration
 	ProbeTimeout  time.Duration
+	Observer      cluster.Observer
 }
 
 type Conn interface {
@@ -78,6 +79,7 @@ func newClient(options Options) *Client {
 		health: cluster.NewHealth(cluster.Options{
 			FailThreshold: options.FailThreshold,
 			Cooldown:      options.NodeCooldown,
+			Observer:      options.Observer,
 		}),
 		conns: make(map[string]Conn),
 	}
@@ -138,7 +140,7 @@ func (c *Client) roundTrip(ctx context.Context, req protocol.Request) (protocol.
 	if len(c.options.Nodes) == 0 {
 		return protocol.Response{}, ErrUnsupported
 	}
-	nodes := c.health.Available(c.placement.Candidates(req.Key))
+	nodes := c.health.AvailableForOp(c.placement.Candidates(req.Key), protocolOpName(req.Op))
 	if len(nodes) == 0 {
 		return protocol.Response{}, remote.ErrUnavailable
 	}
@@ -178,6 +180,19 @@ func (c *Client) roundTrip(ctx context.Context, req protocol.Request) (protocol.
 		return protocol.Response{Status: protocol.StatusMiss}, nil
 	}
 	return protocol.Response{}, remote.ErrUnavailable
+}
+
+func protocolOpName(op protocol.Op) string {
+	switch op {
+	case protocol.OpGet:
+		return "get"
+	case protocol.OpPut:
+		return "put"
+	case protocol.OpDelete:
+		return "delete"
+	default:
+		return string(op)
+	}
 }
 
 func (c *Client) connection(ctx context.Context, node string) (Conn, error) {

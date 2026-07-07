@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/juicedata/juicefs/pkg/cache/remote"
+	"github.com/juicedata/juicefs/pkg/cache/remote/cluster"
 	"github.com/juicedata/juicefs/pkg/cache/remote/httpcache"
 	"github.com/juicedata/juicefs/pkg/cache/remote/mock"
 	"github.com/juicedata/juicefs/pkg/cache/remote/rdma"
@@ -736,23 +737,54 @@ type cachedStore struct {
 	downLimit       *ratelimit.Bucket
 	remoteCache     remote.Client
 
-	cacheHits            prometheus.Counter
-	cacheMiss            prometheus.Counter
-	cacheHitBytes        prometheus.Counter
-	cacheMissBytes       prometheus.Counter
-	cacheReadHist        prometheus.Histogram
-	objectReqsHistogram  *prometheus.HistogramVec
-	objectReqErrors      prometheus.Counter
-	objectDataBytes      *prometheus.CounterVec
-	stageBlockDelay      prometheus.Counter
-	stageBlockErrors     prometheus.Counter
-	remoteCacheGets      *prometheus.CounterVec
-	remoteCacheGetBytes  *prometheus.CounterVec
-	remoteCachePuts      *prometheus.CounterVec
-	remoteCachePutBytes  *prometheus.CounterVec
-	remoteCacheGetHist   prometheus.Histogram
-	remoteCachePutHist   prometheus.Histogram
-	remoteCacheFallbacks prometheus.Counter
+	cacheHits                 prometheus.Counter
+	cacheMiss                 prometheus.Counter
+	cacheHitBytes             prometheus.Counter
+	cacheMissBytes            prometheus.Counter
+	cacheReadHist             prometheus.Histogram
+	objectReqsHistogram       *prometheus.HistogramVec
+	objectReqErrors           prometheus.Counter
+	objectDataBytes           *prometheus.CounterVec
+	stageBlockDelay           prometheus.Counter
+	stageBlockErrors          prometheus.Counter
+	remoteCacheGets           *prometheus.CounterVec
+	remoteCacheGetBytes       *prometheus.CounterVec
+	remoteCachePuts           *prometheus.CounterVec
+	remoteCachePutBytes       *prometheus.CounterVec
+	remoteCacheGetHist        prometheus.Histogram
+	remoteCachePutHist        prometheus.Histogram
+	remoteCacheFallbacks      prometheus.Counter
+	remoteCacheNodeDown       *prometheus.GaugeVec
+	remoteCacheNodeFailures   *prometheus.CounterVec
+	remoteCacheNodeRecoveries *prometheus.CounterVec
+	remoteCacheNodeSkips      *prometheus.CounterVec
+	remoteCacheNodeProbes     *prometheus.CounterVec
+}
+
+type remoteCacheHealthObserver struct {
+	transport string
+	store     *cachedStore
+}
+
+func (o remoteCacheHealthObserver) NodeFailure(node string) {
+	o.store.remoteCacheNodeFailures.WithLabelValues(o.transport, node).Inc()
+}
+
+func (o remoteCacheHealthObserver) NodeDown(node string) {
+	o.store.remoteCacheNodeDown.WithLabelValues(o.transport, node).Set(1)
+}
+
+func (o remoteCacheHealthObserver) NodeRecovered(node string) {
+	o.store.remoteCacheNodeDown.WithLabelValues(o.transport, node).Set(0)
+	o.store.remoteCacheNodeRecoveries.WithLabelValues(o.transport, node).Inc()
+}
+
+func (o remoteCacheHealthObserver) NodeSkipped(node, op string) {
+	o.store.remoteCacheNodeSkips.WithLabelValues(o.transport, node, op).Inc()
+}
+
+func (o remoteCacheHealthObserver) NodeProbe(node string, result cluster.ProbeResult) {
+	o.store.remoteCacheNodeProbes.WithLabelValues(o.transport, node, string(result)).Inc()
 }
 
 func logRequest(typeStr, key, param, reqID string, err error, used time.Duration) {
@@ -1006,6 +1038,8 @@ func NewCachedStore(storage object.ObjectStorage, config Config, reg prometheus.
 		pendingKeys:     make(map[string]*pendingItem),
 		group:           NewController(),
 	}
+	store.initMetrics()
+	healthObserver := remoteCacheHealthObserver{transport: config.RemoteCacheTransport, store: store}
 	switch config.RemoteCacheMode {
 	case "mock":
 		store.remoteCache = mock.NewClient()
@@ -1022,6 +1056,7 @@ func NewCachedStore(storage object.ObjectStorage, config Config, reg prometheus.
 					NodeCooldown:  config.RemoteCacheNodeCooldown,
 					ProbeInterval: config.RemoteCacheProbeInterval,
 					ProbeTimeout:  config.RemoteCacheProbeTimeout,
+					Observer:      healthObserver,
 				})
 			default:
 				store.remoteCache = httpcache.NewClientWithOptions(httpcache.Options{
@@ -1032,6 +1067,7 @@ func NewCachedStore(storage object.ObjectStorage, config Config, reg prometheus.
 					NodeCooldown:  config.RemoteCacheNodeCooldown,
 					ProbeInterval: config.RemoteCacheProbeInterval,
 					ProbeTimeout:  config.RemoteCacheProbeTimeout,
+					Observer:      healthObserver,
 				})
 			}
 		}
@@ -1043,7 +1079,6 @@ func NewCachedStore(storage object.ObjectStorage, config Config, reg prometheus.
 	if config.DownloadLimit > 0 {
 		store.downLimit = ratelimit.NewBucketWithRate(float64(config.DownloadLimit)*0.85, config.DownloadLimit/10)
 	}
-	store.initMetrics()
 	if store.conf.Writeback {
 		store.startHour, store.endHour, _ = config.parseHours()
 		if store.startHour != store.endHour {
@@ -1200,6 +1235,26 @@ func (store *cachedStore) initMetrics() {
 		Name: "remote_cache_fallbacks_total",
 		Help: "remote cache fallbacks to object storage",
 	})
+	store.remoteCacheNodeDown = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "remote_cache_node_down",
+		Help: "remote cache node health state, 1 means down",
+	}, []string{"transport", "node"})
+	store.remoteCacheNodeFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "remote_cache_node_failures_total",
+		Help: "remote cache node failure events",
+	}, []string{"transport", "node"})
+	store.remoteCacheNodeRecoveries = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "remote_cache_node_recoveries_total",
+		Help: "remote cache node recovery events",
+	}, []string{"transport", "node"})
+	store.remoteCacheNodeSkips = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "remote_cache_node_skips_total",
+		Help: "remote cache node skips while unhealthy",
+	}, []string{"transport", "node", "op"})
+	store.remoteCacheNodeProbes = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "remote_cache_node_probe_total",
+		Help: "remote cache node active probe results",
+	}, []string{"transport", "node", "result"})
 }
 
 func (store *cachedStore) regMetrics(reg prometheus.Registerer) {
@@ -1223,6 +1278,11 @@ func (store *cachedStore) regMetrics(reg prometheus.Registerer) {
 	reg.MustRegister(store.remoteCacheGetHist)
 	reg.MustRegister(store.remoteCachePutHist)
 	reg.MustRegister(store.remoteCacheFallbacks)
+	reg.MustRegister(store.remoteCacheNodeDown)
+	reg.MustRegister(store.remoteCacheNodeFailures)
+	reg.MustRegister(store.remoteCacheNodeRecoveries)
+	reg.MustRegister(store.remoteCacheNodeSkips)
+	reg.MustRegister(store.remoteCacheNodeProbes)
 	reg.MustRegister(prometheus.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Name: "blockcache_blocks",

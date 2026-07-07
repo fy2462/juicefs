@@ -32,9 +32,12 @@ import (
 	"time"
 
 	"github.com/juicedata/juicefs/pkg/cache/remote"
+	"github.com/juicedata/juicefs/pkg/cache/remote/cluster"
 	"github.com/juicedata/juicefs/pkg/cache/remote/httpcache"
 	"github.com/juicedata/juicefs/pkg/cache/remote/mock"
 	"github.com/juicedata/juicefs/pkg/object"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -425,6 +428,65 @@ func TestRemoteCacheConfigValidation(t *testing.T) {
 	require.Equal(t, 5*time.Second, conf.RemoteCacheNodeCooldown)
 	require.Equal(t, time.Second, conf.RemoteCacheProbeInterval)
 	require.Equal(t, 10*time.Millisecond, conf.RemoteCacheProbeTimeout)
+}
+
+func TestRemoteCacheHealthObserverMetrics(t *testing.T) {
+	mem, err := object.CreateStorage("mem", "", "", "", "")
+	require.NoError(t, err)
+	reg := prometheus.NewRegistry()
+	conf := defaultConf
+	conf.CacheDir = "memory"
+	store := NewCachedStore(mem, conf, reg).(*cachedStore)
+	observer := remoteCacheHealthObserver{transport: "http", store: store}
+
+	observer.NodeFailure("node-a")
+	observer.NodeDown("node-a")
+	observer.NodeSkipped("node-a", "get")
+	observer.NodeProbe("node-a", cluster.ProbeFailure)
+	observer.NodeRecovered("node-a")
+
+	require.Equal(t, float64(1), metricValue(t, reg, "remote_cache_node_failures_total", map[string]string{"transport": "http", "node": "node-a"}))
+	require.Equal(t, float64(0), metricValue(t, reg, "remote_cache_node_down", map[string]string{"transport": "http", "node": "node-a"}))
+	require.Equal(t, float64(1), metricValue(t, reg, "remote_cache_node_skips_total", map[string]string{"transport": "http", "node": "node-a", "op": "get"}))
+	require.Equal(t, float64(1), metricValue(t, reg, "remote_cache_node_probe_total", map[string]string{"transport": "http", "node": "node-a", "result": "failure"}))
+	require.Equal(t, float64(1), metricValue(t, reg, "remote_cache_node_recoveries_total", map[string]string{"transport": "http", "node": "node-a"}))
+}
+
+func metricValue(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) float64 {
+	t.Helper()
+	metricFamilies, err := reg.Gather()
+	require.NoError(t, err)
+	for _, family := range metricFamilies {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			if !metricLabelsMatch(metric.GetLabel(), labels) {
+				continue
+			}
+			if metric.GetGauge() != nil {
+				return metric.GetGauge().GetValue()
+			}
+			if metric.GetCounter() != nil {
+				return metric.GetCounter().GetValue()
+			}
+		}
+	}
+	t.Fatalf("metric %s with labels %v not found", name, labels)
+	return 0
+}
+
+func metricLabelsMatch(labels []*dto.LabelPair, expected map[string]string) bool {
+	if len(labels) != len(expected) {
+		return false
+	}
+	for _, label := range labels {
+		value, ok := expected[label.GetName()]
+		if !ok || value != label.GetValue() {
+			return false
+		}
+	}
+	return true
 }
 
 type countingStore struct {
