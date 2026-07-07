@@ -182,7 +182,17 @@ make test.rdma-native-strict
 Run strict native transport smoke with an open-rdma checkout in mock mode:
 
 ```sh
-hack/rdma-native-smoke-test.sh --mock-rdma DIR
+OPEN_RDMA_DRIVER=/media/psf/Home/github/PFS/open-rdma-driver \
+make test.rdma-native-mock
+```
+
+Run the same mock-backed path under the stress harness:
+
+```sh
+OPEN_RDMA_DRIVER=/media/psf/Home/github/PFS/open-rdma-driver \
+JFS_RDMA_STRESS_OPS=5000 \
+JFS_RDMA_STRESS_CONCURRENCY=16 \
+make test.rdma-native-mock-stress
 ```
 
 Run a configurable local stress pass:
