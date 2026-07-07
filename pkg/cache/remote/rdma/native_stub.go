@@ -20,6 +20,10 @@ package rdma
 
 import "context"
 
+func newNativeDialerFromEnv() Dialer {
+	return unsupportedDialer{}
+}
+
 func ListenAndServe(ctx context.Context, options ServeOptions) error {
 	if err := ctx.Err(); err != nil {
 		return err

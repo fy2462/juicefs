@@ -28,6 +28,9 @@ import (
 )
 
 func NewClient(options Options) remote.Client {
+	if options.Dialer == nil {
+		options.Dialer = newNativeDialerFromEnv()
+	}
 	return newClient(options)
 }
 

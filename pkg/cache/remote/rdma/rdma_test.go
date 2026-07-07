@@ -31,6 +31,9 @@ import (
 )
 
 func TestNewClientReturnsUnsupportedByDefault(t *testing.T) {
+	if Capability().Built {
+		t.Skip("default unsupported client behavior only applies without the rdma build tag")
+	}
 	client := NewClient(Options{
 		Nodes:    []string{"127.0.0.1:9568"},
 		Timeout:  time.Millisecond,
