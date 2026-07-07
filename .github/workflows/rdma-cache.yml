@@ -10,6 +10,7 @@ on:
       - 'Makefile'
       - 'cmd/rdma_cache_server*.go'
       - 'hack/rdma-*-smoke-test.sh'
+      - 'hack/three-tier-cache-rustfs-test.sh'
       - 'pkg/cache/remote/**'
       - 'pkg/chunk/**'
   pull_request:
@@ -21,6 +22,7 @@ on:
       - 'Makefile'
       - 'cmd/rdma_cache_server*.go'
       - 'hack/rdma-*-smoke-test.sh'
+      - 'hack/three-tier-cache-rustfs-test.sh'
       - 'pkg/cache/remote/**'
       - 'pkg/chunk/**'
   workflow_dispatch:
@@ -54,8 +56,37 @@ jobs:
 
       - name: Test default RDMA compatibility
         run: |
+          ./hack/rdma-cache-workflow-test.sh
           go test ./pkg/cache/remote/rdma/...
           go test ./cmd -run 'TestRDMACacheServer'
+
+      - name: Setup upterm session
+        if: failure() && (github.event.inputs.debug == 'true' || github.run_attempt != 1)
+        timeout-minutes: 60
+        uses: lhotari/action-upterm@v1
+
+  three-tier-rustfs:
+    timeout-minutes: 40
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+
+      - name: Set up Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: 'oldstable'
+          cache: true
+
+      - name: Install three-tier smoke dependencies
+        run: |
+          sudo .github/scripts/apt_install.sh fuse3 sqlite3
+
+      - name: Run RustFS three-tier cache smoke
+        run: |
+          make test.three-tier-cache-rustfs
 
       - name: Setup upterm session
         if: failure() && (github.event.inputs.debug == 'true' || github.run_attempt != 1)
