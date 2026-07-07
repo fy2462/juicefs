@@ -1,0 +1,51 @@
+groups:
+  - name: juicefs-rdma-cache
+    rules:
+      - alert: JuiceFSRemoteCacheNodeDown
+        expr: juicefs_remote_cache_node_down{transport=~"http|rdma"} == 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "JuiceFS remote cache node is marked down"
+          description: "Remote cache node {{ $labels.node }} using {{ $labels.transport }} transport has been marked down for more than 2 minutes."
+
+      - alert: JuiceFSRemoteCacheAllReplicasSkipped
+        expr: |
+          sum by (instance, transport, op) (
+            rate(juicefs_remote_cache_node_skips_total{transport=~"http|rdma"}[5m])
+          ) > 0
+          and
+          sum by (instance, transport) (
+            juicefs_remote_cache_node_down{transport=~"http|rdma"}
+          ) >= 2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "JuiceFS remote cache replicas are being skipped"
+          description: "Client {{ $labels.instance }} is skipping remote cache nodes for {{ $labels.op }} while multiple {{ $labels.transport }} nodes are down."
+
+      - alert: JuiceFSRemoteCacheProbeFailures
+        expr: |
+          sum by (instance, transport, node) (
+            rate(juicefs_remote_cache_node_probe_total{transport=~"http|rdma",result="failure"}[5m])
+          ) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "JuiceFS remote cache health probes are failing"
+          description: "Health probes for remote cache node {{ $labels.node }} have failed for 10 minutes."
+
+      - alert: JuiceFSRemoteCacheFallbacksHigh
+        expr: |
+          sum by (instance) (
+            rate(juicefs_remote_cache_fallbacks_total[5m])
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "JuiceFS remote cache fallback rate is high"
+          description: "Client {{ $labels.instance }} is falling back from remote cache to object storage more than once per second."

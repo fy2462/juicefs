@@ -58,6 +58,39 @@ The important failure behavior is:
 - If all L2 nodes are unavailable, reads fall back to L1 and then L3.
 - If both L2 and L3 are unavailable and L1 is empty, the read fails.
 
+Use native RDMA transport for the current `rdma` tagged build:
+
+```sh
+go build -tags rdma -o juicefs-rdma .
+./juicefs-rdma rdma-cache-server \
+  --listen 127.0.0.1:9568 \
+  --transport rdma \
+  --cache-dir /tmp/jfs-l2 \
+  --cache-size 64G
+
+./juicefs-rdma mount \
+  --cache-dir /tmp/jfs-l1 \
+  --cache-size 64 \
+  --remote-cache rdma \
+  --remote-cache-transport rdma \
+  --remote-cache-nodes 127.0.0.1:9568 \
+  --remote-cache-timeout 50ms \
+  --remote-cache-fail-threshold 3 \
+  --remote-cache-node-cooldown 5s \
+  --remote-cache-probe-interval 1s \
+  --remote-cache-probe-timeout 10ms \
+  sqlite3:///tmp/jfs-meta.db /mnt/jfs
+```
+
+Native transport build-time and runtime knobs:
+
+| Name | Default | Meaning |
+| --- | --- | --- |
+| `OPEN_RDMA_DRIVER` | unset | Optional open-rdma checkout used by the capability gate. |
+| `JFS_RDMA_DEVICE_INDEX` | `0` | RDMA device index passed to native resource setup. |
+| `JFS_RDMA_MAX_FRAME_BYTES` | `4194304` | Maximum protocol frame size; values below 64 KiB are raised to 64 KiB. |
+| `JFS_RDMA_CQ_TIMEOUT` | `50ms` | Completion queue timeout placeholder for the verbs data path. |
+
 ## Smoke Coverage
 
 Run:
@@ -82,12 +115,33 @@ Point `OPEN_RDMA_DRIVER` at an open-rdma checkout:
 ```sh
 export OPEN_RDMA_DRIVER=/media/psf/Home/github/PFS/open-rdma-driver
 hack/open-rdma-smoke-test.sh --driver-dir "$OPEN_RDMA_DRIVER"
-PATH=/usr/local/go/bin:$PATH go test -tags rdma ./pkg/cache/remote/rdma
+PATH=/usr/local/go/bin:$PATH go test -tags rdma ./pkg/cache/remote/rdma/...
 ```
 
-The `rdma` build tag now exposes a native capability gate. It does not add a cgo
-or libibverbs data path yet; it verifies that the open-rdma checkout boundary is
-present and keeps protocol/client tests hardware-independent.
+The `rdma` build tag now compiles the native transport boundary, a libibverbs
+resource skeleton, and a framed protocol server/client path. The data movement
+path is still the staged frame protocol used by the native smoke; the remaining
+production gap is replacing the framed TCP transfer with real verbs queue-pair
+send/receive operations and completion handling.
+
+## Native Smoke And Stress
+
+Run the direct native transport smoke:
+
+```sh
+make test.rdma-native-smoke
+```
+
+Run a configurable local stress pass:
+
+```sh
+JFS_RDMA_STRESS_OPS=5000 JFS_RDMA_STRESS_CONCURRENCY=16 make test.rdma-native-stress
+```
+
+The stress harness builds a `rdma` tagged `juicefs`, starts
+`rdma-cache-server --transport=rdma`, and runs concurrent PUT/GET/DELETE
+round trips through the RDMA client. It is a correctness and regression stress,
+not a final RDMA bandwidth benchmark until the verbs data path is complete.
 
 ## Metrics
 
@@ -104,3 +158,22 @@ juicefs_remote_cache_node_probe_total{transport,node,result}
 Alert on sustained `node_down == 1`, rising skips for all replicas, or repeated
 probe failures. Node labels are configured node addresses, so do not include
 secrets in `--remote-cache-nodes`.
+
+Prometheus alert rule examples are in:
+
+```text
+docs/superpowers/runbooks/rdma-cache-alerts.prometheus.yml
+```
+
+Operational guidance:
+
+- Page on `JuiceFSRemoteCacheAllReplicasSkipped`; clients are likely falling
+  through to L3 object storage and losing L2 latency protection.
+- Treat `JuiceFSRemoteCacheNodeDown` as a node-level repair signal; metadata
+  remains authoritative in JuiceFS metadata plus object storage, and L2 cache
+  entries are disposable.
+- In a single L2 node failure, keep the mounted clients running. The health
+  manager skips the failed node, active probes detect recovery, and reads fall
+  back to L1/L3 when no selected remote replica is healthy.
+- If fallback alerts rise while S3/RustFS latency also rises, increase remote
+  cache replicas or restore the failed L2 node before adding client concurrency.
