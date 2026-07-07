@@ -129,6 +129,9 @@ test.three-tier-cache-rustfs:
 test.rdma-native-smoke:
 	./hack/rdma-native-smoke-test.sh
 
+test.rdma-native-stress:
+	JFS_RDMA_SMOKE_OPS=$${JFS_RDMA_STRESS_OPS:-500} JFS_RDMA_SMOKE_CONCURRENCY=$${JFS_RDMA_STRESS_CONCURRENCY:-8} ./hack/rdma-native-smoke-test.sh
+
 unit-random-test:
 	echo "Using meta:$(meta), seed: $(seed), checks:${checks}, steps: $(steps)"
 	go test ./pkg/meta/... -rapid.meta="$(meta)" -rapid.seed=$(seed) -rapid.checks=$(checks) -rapid.steps=$(steps) -run "TestFSOps" -v -failfast -count=1 -timeout=60m -cover -coverpkg=./pkg/... -args -test.gocoverdir="$(shell realpath cover/)"

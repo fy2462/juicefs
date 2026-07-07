@@ -67,7 +67,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/juicedata/juicefs/pkg/cache/remote"
@@ -79,59 +82,126 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: client ADDR")
 		os.Exit(2)
 	}
-	client := rdma.NewClient(rdma.Options{
-		Nodes:   []string{os.Args[1]},
-		Timeout: 50 * time.Millisecond,
-	})
-	defer client.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := waitPut(ctx, client); err != nil {
+	addr := os.Args[1]
+	ops := envInt("JFS_RDMA_SMOKE_OPS", 1)
+	concurrency := envInt("JFS_RDMA_SMOKE_CONCURRENCY", 1)
+	if ops < 1 {
+		fmt.Fprintln(os.Stderr, "JFS_RDMA_SMOKE_OPS must be >= 1")
+		os.Exit(2)
+	}
+	if concurrency < 1 {
+		fmt.Fprintln(os.Stderr, "JFS_RDMA_SMOKE_CONCURRENCY must be >= 1")
+		os.Exit(2)
+	}
+	if concurrency > ops {
+		concurrency = ops
+	}
+	if err := waitForServer(addr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	reader, err := client.Get(context.Background(), "rdma-native-smoke", 0, -1)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "get failed: %v\n", err)
+	start := time.Now()
+	if err := runWorkload(addr, ops, concurrency); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	data, err := io.ReadAll(reader)
-	_ = reader.Close()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "read failed: %v\n", err)
-		os.Exit(1)
-	}
-	if !bytes.Equal(data, []byte("native-smoke-data")) {
-		fmt.Fprintf(os.Stderr, "unexpected payload: %q\n", data)
-		os.Exit(1)
-	}
-	if err := client.Delete(context.Background(), "rdma-native-smoke"); err != nil {
-		fmt.Fprintf(os.Stderr, "delete failed: %v\n", err)
-		os.Exit(1)
-	}
-	if _, err := client.Get(context.Background(), "rdma-native-smoke", 0, -1); err != remote.ErrMiss {
-		fmt.Fprintf(os.Stderr, "expected miss after delete, got %v\n", err)
-		os.Exit(1)
-	}
+	fmt.Printf("completed %d rdma native cache operations with concurrency %d in %s\n", ops, concurrency, time.Since(start).Round(time.Millisecond))
 }
 
-func waitPut(ctx context.Context, client remote.Client) error {
+func waitForServer(addr string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	var lastErr error
 	for {
-		lastErr = client.Put(context.Background(), "rdma-native-smoke", []byte("native-smoke-data"))
-		if lastErr == nil {
+		conn, err := net.DialTimeout("tcp", addr, 50*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
 			return nil
 		}
+		lastErr = err
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("put did not succeed before timeout: %w", lastErr)
+			return fmt.Errorf("server did not become ready before timeout: %w", lastErr)
 		case <-ticker.C:
 		}
 	}
 }
+
+func runWorkload(addr string, ops, concurrency int) error {
+	errCh := make(chan error, concurrency)
+	var wg sync.WaitGroup
+	for worker := 0; worker < concurrency; worker++ {
+		count := ops / concurrency
+		if worker < ops%concurrency {
+			count++
+		}
+		wg.Add(1)
+		go func(worker, count int) {
+			defer wg.Done()
+			if err := runWorker(addr, worker, count); err != nil {
+				errCh <- err
+			}
+		}(worker, count)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func runWorker(addr string, worker, count int) error {
+	client := rdma.NewClient(rdma.Options{
+		Nodes:   []string{addr},
+		Timeout: 200 * time.Millisecond,
+	})
+	defer client.Close()
+	for i := 0; i < count; i++ {
+		key := fmt.Sprintf("rdma-native-smoke-%d-%d", worker, i)
+		payload := []byte(fmt.Sprintf("native-smoke-data-%d-%d", worker, i))
+		if err := client.Put(context.Background(), key, payload); err != nil {
+			return fmt.Errorf("put %s failed: %w", key, err)
+		}
+		reader, err := client.Get(context.Background(), key, 0, -1)
+		if err != nil {
+			return fmt.Errorf("get %s failed: %w", key, err)
+		}
+		data, err := io.ReadAll(reader)
+		_ = reader.Close()
+		if err != nil {
+			return fmt.Errorf("read %s failed: %w", key, err)
+		}
+		if !bytes.Equal(data, payload) {
+			return fmt.Errorf("unexpected payload for %s: %q", key, data)
+		}
+		if err := client.Delete(context.Background(), key); err != nil {
+			return fmt.Errorf("delete %s failed: %w", key, err)
+		}
+		if _, err := client.Get(context.Background(), key, 0, -1); err != remote.ErrMiss {
+			return fmt.Errorf("expected miss after delete for %s, got %v", key, err)
+		}
+	}
+	return nil
+}
+
+func envInt(name string, defaultValue int) int {
+	value := os.Getenv(name)
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s must be an integer: %v\n", name, err)
+		os.Exit(2)
+	}
+	return parsed
+}
+
 EOF
 }
 
