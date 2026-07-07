@@ -32,6 +32,8 @@ assert_makefile_contains() {
 assert_contains "JFS_RDMA_SMOKE_REPORT"
 assert_contains "ops_per_second"
 assert_contains "duration_ms"
+assert_contains "DurationMS"
+assert_contains "OpsPerSecond"
 assert_contains "--mock-rdma"
 assert_contains "OPEN_RDMA_DRIVER"
 assert_contains "LD_LIBRARY_PATH"
@@ -42,5 +44,7 @@ assert_not_contains '. "$MOCK_RDMA_DIR/scripts/setup-env.sh"'
 assert_makefile_contains "test.rdma-native-mock:"
 assert_makefile_contains '--mock-rdma "$${OPEN_RDMA_DRIVER'
 assert_makefile_contains "test.rdma-native-mock-stress:"
+assert_makefile_contains 'JFS_RDMA_SMOKE_OPS=$${JFS_RDMA_STRESS_OPS:-1} JFS_RDMA_SMOKE_CONCURRENCY=$${JFS_RDMA_STRESS_CONCURRENCY:-1}'
+assert_makefile_contains 'JFS_RDMA_SMOKE_OPS=$${JFS_RDMA_STRESS_OPS:-500} JFS_RDMA_SMOKE_CONCURRENCY=$${JFS_RDMA_STRESS_CONCURRENCY:-8}'
 
 echo "ok - rdma native smoke script documents performance report output"

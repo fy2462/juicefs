@@ -232,11 +232,14 @@ juicefs_remote_cache_node_failures_total{transport,node}
 juicefs_remote_cache_node_recoveries_total{transport,node}
 juicefs_remote_cache_node_skips_total{transport,node,op}
 juicefs_remote_cache_node_probe_total{transport,node,result}
+juicefs_remote_cache_fallbacks_total
 ```
 
 Alert on sustained `node_down == 1`, rising skips for all replicas, or repeated
-probe failures. Node labels are configured node addresses, so do not include
-secrets in `--remote-cache-nodes`.
+probe failures. Alert on a sustained increase in
+`juicefs_remote_cache_fallbacks_total` when L2 should normally absorb reads.
+Node labels are configured node addresses, so do not include secrets in
+`--remote-cache-nodes`.
 
 Prometheus alert rule examples are in:
 
