@@ -11,6 +11,8 @@ on:
       - 'cmd/rdma_cache_server*.go'
       - 'docs/superpowers/runbooks/2026-07-07-rdma-distributed-cache.md'
       - 'docs/superpowers/runbooks/rdma-cache-alerts.prometheus.yml'
+      - 'hack/rdma-cache-stress.sh'
+      - 'hack/rdma-cache-stress-test.sh'
       - 'hack/rdma-cache-runbook-test.sh'
       - 'hack/rdma-cache-workflow-test.sh'
       - 'hack/rdma-*-smoke-test.sh'
@@ -29,6 +31,8 @@ on:
       - 'cmd/rdma_cache_server*.go'
       - 'docs/superpowers/runbooks/2026-07-07-rdma-distributed-cache.md'
       - 'docs/superpowers/runbooks/rdma-cache-alerts.prometheus.yml'
+      - 'hack/rdma-cache-stress.sh'
+      - 'hack/rdma-cache-stress-test.sh'
       - 'hack/rdma-cache-runbook-test.sh'
       - 'hack/rdma-cache-workflow-test.sh'
       - 'hack/rdma-*-smoke-test.sh'
@@ -69,6 +73,7 @@ jobs:
       - name: Test default RDMA compatibility
         run: |
           ./hack/rdma-cache-workflow-test.sh
+          ./hack/rdma-cache-stress-test.sh
           ./hack/three-tier-cache-rustfs-test-test.sh
           ./hack/rdma-native-smoke-test-test.sh
           go test ./pkg/cache/remote/rdma/...

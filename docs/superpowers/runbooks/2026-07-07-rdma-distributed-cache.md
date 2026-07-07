@@ -207,6 +207,23 @@ JFS_RDMA_STRESS_CONCURRENCY=16 \
 make test.rdma-native-stress
 ```
 
+For latency percentiles against an already running remote cache server, use the
+standalone stress harness:
+
+```sh
+hack/rdma-cache-stress.sh \
+  --transport http \
+  --nodes 127.0.0.1:9568 \
+  --concurrency 4 \
+  --size 65536 \
+  --duration 30s \
+  --json
+```
+
+Switch `--transport rdma` on hosts built with `-tags rdma` and native RDMA
+readiness. The JSON output includes `ops`, `errors`, `ops_per_second`,
+`p50_ms`, `p95_ms`, and `p99_ms`.
+
 Run the same stress workload in strict native mode on an RDMA-capable host:
 
 ```sh

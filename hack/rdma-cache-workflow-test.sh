@@ -15,6 +15,15 @@ grep -F "hack/three-tier-cache-rustfs-test.sh" "$workflow" >/dev/null ||
 grep -F "hack/rdma-cache-runbook-test.sh" "$workflow" >/dev/null ||
   fail "rdma-cache workflow does not trigger on the runbook guard script"
 
+grep -F "hack/rdma-cache-stress.sh" "$workflow" >/dev/null ||
+  fail "rdma-cache workflow does not trigger on the stress script"
+
+grep -F "hack/rdma-cache-stress-test.sh" "$workflow" >/dev/null ||
+  fail "rdma-cache workflow does not trigger on the stress guard script"
+
+grep -F "./hack/rdma-cache-stress-test.sh" "$workflow" >/dev/null ||
+  fail "rdma-cache workflow does not run the stress guard script"
+
 grep -F "hack/rdma-native-smoke-test-test.sh" "$workflow" >/dev/null ||
   fail "rdma-cache workflow does not trigger on the native smoke guard script"
 
