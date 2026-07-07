@@ -239,25 +239,28 @@ func (r *Resources) PostSend(payload []byte) error {
 	return nil
 }
 
-func (r *Resources) PollCompletion() error {
+func (r *Resources) PollCompletion() (int, error) {
 	if r == nil || r.completionQueue == nil {
-		return ErrNoDevice
+		return 0, ErrNoDevice
 	}
 	var wc C.struct_ibv_wc
 	for attempts := 0; attempts < 10000; attempts++ {
 		n := C.ibv_poll_cq(r.completionQueue, 1, &wc)
 		if n < 0 {
-			return fmt.Errorf("poll RDMA completion queue: %w", errnoError())
+			return 0, fmt.Errorf("poll RDMA completion queue: %w", errnoError())
 		}
 		if n == 0 {
 			continue
 		}
 		if wc.status != C.IBV_WC_SUCCESS {
-			return fmt.Errorf("RDMA work completion failed with status %d", int(wc.status))
+			return 0, fmt.Errorf("RDMA work completion failed with status %d", int(wc.status))
 		}
-		return nil
+		if wc.opcode == C.IBV_WC_RECV {
+			return int(wc.byte_len), nil
+		}
+		return 0, nil
 	}
-	return fmt.Errorf("poll RDMA completion queue: timeout")
+	return 0, fmt.Errorf("poll RDMA completion queue: timeout")
 }
 
 func DeviceCount() (int, error) {

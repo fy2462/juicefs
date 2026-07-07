@@ -141,7 +141,11 @@ func TestSendReceiveCompletesWhenDeviceExists(t *testing.T) {
 
 	require.NoError(t, right.PostRecv())
 	require.NoError(t, left.PostSend([]byte("verbs-payload")))
-	require.NoError(t, left.PollCompletion())
-	require.NoError(t, right.PollCompletion())
+	leftBytes, err := left.PollCompletion()
+	require.NoError(t, err)
+	require.Zero(t, leftBytes)
+	rightBytes, err := right.PollCompletion()
+	require.NoError(t, err)
+	require.Equal(t, len("verbs-payload"), rightBytes)
 	require.Equal(t, []byte("verbs-payload"), right.Buffer()[:len("verbs-payload")])
 }
